@@ -1,0 +1,86 @@
+body {
+    background-color: #f8f9fa;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.card {
+    border-radius: 15px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    transition: transform 0.2s;
+}
+
+.card:hover {
+    transform: translateY(-2px);
+}
+
+.progress-bar {
+    transition: width 1s ease-in-out;
+}
+
+.chat-box {
+    height: 350px;
+    overflow-y: auto;
+    background-color: #ffffff;
+    border-bottom: 1px solid #eee;
+    padding: 15px;
+}
+
+.chat-message {
+    padding: 10px 15px;
+    margin-bottom: 10px;
+    border-radius: 20px;
+    max-width: 80%;
+    word-wrap: break-word;
+}
+
+.chat-message.user {
+    background-color: #007bff;
+    color: white;
+    align-self: flex-end;
+    margin-left: auto;
+    text-align: right;
+}
+
+.chat-message.agent {
+    background-color: #e9ecef;
+    color: #333;
+    align-self: flex-start;
+    margin-right: auto;
+}
+
+.chat-message.system {
+    text-align: center;
+    color: #6c757d;
+    font-size: 0.8em;
+    width: 100%;
+    background: transparent;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    text-align: center;
+}
+
+.stat-item {
+    background: #f1f3f5;
+    padding: 10px;
+    border-radius: 10px;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+    width: 8px;
+}
+::-webkit-scrollbar-track {
+    background: #f1f1f1;
+}
+::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #555;
+}
+
