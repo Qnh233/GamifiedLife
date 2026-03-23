@@ -8,10 +8,12 @@
 
 ### 核心特性
 
-- **多智能体编排 (Multi-Agent Orchestration)**: 使用 LangGraph 实现 Supervisor、Planner、Reward 智能体协作
+- **多智能体编排 (Multi-Agent Orchestration)**: 使用 LangGraph 实现 Supervisor、Planner、Reward、Query、Chat、Reflector 协作
+- **工作流闭环**: 主链路为 `supervisor -> {planner|reward|query|chat} -> response -> reflector -> END`
 - **游戏化机制**: XP 经验值系统、随机掉落、成就系统、连续签到
 - **MySQL 持久化存储**: 用户状态、任务、目标、成就、奖励全量存储
 - **MCP 外部工具集成**: 支持读取本地日历、待办事项、GitHub 提交等
+- **定时任务调度**: 支持 APScheduler 驱动的 `chat`/`reflector` 定时执行
 - **Flask 后端服务**: 高性能 Python Web 框架
 
 ## 技术栈
@@ -74,6 +76,14 @@ python -m app.main
 
 服务将在 `http://localhost:5000` 启动。
 
+### 6. 启动 MCP 工具服务（可选但推荐）
+
+```bash
+python -m app.mcp.server
+```
+
+默认地址为 `http://localhost:8001`。
+
 ## API 接口
 
 ### 基础接口
@@ -81,6 +91,7 @@ python -m app.main
 | 方法 | 路径 | 描述 |
 |------|------|------|
 | GET | `/` | 服务信息 |
+| GET | `/api/status` | 服务与 Agent 状态 |
 | GET | `/health` | 健康检查 |
 
 ### 用户接口
@@ -105,6 +116,14 @@ python -m app.main
 |------|------|------|
 | GET | `/api/achievements` | 获取所有成就 |
 | GET | `/api/rewards` | 获取所有奖励 |
+
+### 定时任务接口
+
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| POST | `/api/schedules` | 创建定时任务（`chat`/`reflector`） |
+| GET | `/api/schedules/<user_id>` | 获取用户定时任务 |
+| DELETE | `/api/schedules/<job_id>` | 删除定时任务 |
 
 ## API 使用示例
 
@@ -227,6 +246,7 @@ GamifiedLife/
     ├── config.py            # 配置
     ├── schemas.py           # 数据模型
     ├── main.py              # Flask 主应用
+    ├── scheduler_service.py # APScheduler 调度服务
     ├── agents/              # 智能体模块
     │   ├── state.py         # LangGraph 状态
     │   ├── llm_client.py    # LLM 客户端
@@ -234,12 +254,16 @@ GamifiedLife/
     │   ├── planner.py       # 目标规划
     │   ├── reward.py        # 奖励系统
     │   ├── query.py         # 查询
+    │   ├── chat.py          # 通用聊天
+    │   ├── reflector.py     # 用户画像反思
     │   └── workflow.py      # 工作流
     ├── database/            # 数据层
-    │   └── models.py        # SQLAlchemy 模型
+    │   ├── models.py        # SQLAlchemy 模型
+    │   └── services.py      # Agent 结果持久化
     └── mcp/                 # MCP 协议
         ├── server.py        # MCP 服务
-        └── client.py        # MCP 客户端
+        ├── client.py        # MCP 客户端
+        └── mcp_tools.py     # LangChain 工具包装
 ```
 
 ## 扩展开发
@@ -265,7 +289,16 @@ GamifiedLife/
 ```python
 {'id': 'new_achievement', 'name': 'New Achievement', 'description': '...', 'icon': '🏅', 'target': 1}
 ```
-
+# 计划
+- [ ] 设计用户属性经验条
+- [ ] 添加更多MCP工具
+  - [ ] 日历工具
+  - [ ] 待办事项工具
+  - [ ] GitHub 提交工具
+  - [ ] 获取位置 工具 
+- [ ] 实现自定义奖励（通过chat触发工具并加入奖池）
+  - [ ] 设计奖励生成工具（输入用户状态，输出奖励建议，根据用户行为和目标）
+  - [ ] 将奖励生成工具集成到 Planner 或 Reward Agent 中
 ## License
 
 MIT License
