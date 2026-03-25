@@ -16,6 +16,8 @@ from app.config import config
 from datetime import datetime
 import uuid
 import random
+from app.utils.logging_utils import get_logger, log_event
+logger = get_logger(__name__)
 
 
 REWARD_SYSTEM_PROMPT = """You are the Gamification/Reward Agent for the Gamified Life Engine.
@@ -164,7 +166,7 @@ async def reward_node(state: AgentState) -> AgentState:
                         t['completed_at'] = datetime.now().isoformat()
                         break
         except Exception as e:
-            print(f"Error matching task: {e}")
+            log_event(logger, "agent.reward.task_match_error", level="error", error=str(e), user_id=state.get("user_id"))
             # Fallback logic: if only 1 task exists and it's a short "done" message, assume it's that one
             if len(tasks) == 1 and len(user_input) < 20:
                 completed_task = tasks[0]

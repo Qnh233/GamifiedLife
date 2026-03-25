@@ -15,6 +15,8 @@ from app.agents.state import AgentState
 from app.agents.llm_client import llm_client
 
 from app.common.POJO.supervisor_Decision import Decision
+from app.utils.logging_utils import get_logger, log_event, preview_text
+logger = get_logger(__name__)
 
 SUPERVISOR_SYSTEM_PROMPT = """You are the Supervisor Agent for the Gamified Life Engine.
 
@@ -44,12 +46,12 @@ Example output:
 {"decision": "PLANNING", "reasoning": "User wants to create a new goal for their thesis", "confidence": 0.95}
 """
 
-async def supervisor_node(state: AgentState, config: RunnableConfig) -> AgentState:
+async def supervisor_node(state: AgentState) -> AgentState:
     user_input = state["user_input"]
     # 1. 实例化解析器，绑定你的 Pydantic 模型
     parser = JsonOutputParser(pydantic_object=Decision)
     # format_instructions = parser.get_format_instructions()
-    
+
     # Ensure we don't duplicate the raw input if it's already in state history
     messages_for_prompt = state["messages"]
     if messages_for_prompt and isinstance(messages_for_prompt[-1], HumanMessage) and messages_for_prompt[-1].content == user_input:
@@ -71,7 +73,7 @@ async def supervisor_node(state: AgentState, config: RunnableConfig) -> AgentSta
         # 如果你后续严格需要 Pydantic 对象，可以取消下面这行的注释:
         # response_data = Decision(**response_data).model_dump()
     except json.JSONDecodeError:
-        print(f"[Supervisor Error] Failed to parse JSON: {content}")
+        log_event(logger, "agent.supervisor.parse_error", level="error", content_preview=preview_text(content))
         # 容错处理：如果解析失败，默认走常规聊天
         response_data = {
             "decision": "CHAT",
@@ -80,9 +82,17 @@ async def supervisor_node(state: AgentState, config: RunnableConfig) -> AgentSta
         }
     
     # Return delta update instead of modifying state in-place
-    print(f"Supervisor decided to route to: \-\> {str(response_data.get('decision', 'CHAT')).upper()}")
-    print("=====================================\n")
-    
+    # print(f"Supervisor decided to route to: \-\> {str(response_data.get('decision', 'CHAT')).upper()}")
+    # print("=====================================\n")
+    log_event(
+        logger,
+        "agent.supervisor.route_decision",
+        user_id=state.get("user_id"),
+        decision=str(response_data.get("decision", "CHAT")).upper(),
+        confidence=response_data.get("confidence"),
+        reasoning=preview_text(response_data.get("reasoning")),
+    )
+
     return {
         "supervisor_decision": response_data,
         "next_agent": str(response_data.get("decision", "CHAT")).upper(),

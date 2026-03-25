@@ -6,6 +6,9 @@ from app.database.models import db, ScheduledJob, User, Goal, Task, ChatLog
 from app.database.services import save_agent_result
 from app.agents.reflector import run_reflector
 from app.agents.workflow import run_agent_workflow
+import time
+from app.utils.logging_utils import get_logger, log_event, preview_text
+logger = get_logger(__name__)
 
 scheduler = APScheduler()
 
@@ -49,18 +52,18 @@ def add_job_to_scheduler(job_id, cron_expression, job_type, user_id, message_con
             replace_existing=True,
             **trigger_args
         )
-        print(f"Successfully added job {job_id} ({job_type}) for user {user_id} with cron '{cron_expression}'")
+        log_event(logger, "scheduler.job.added", job_id=job_id, job_type=job_type, user_id=user_id, cron_expression=cron_expression)
+
     except Exception as e:
-        print(f"Error adding job {job_id}: {e}")
+        log_event(logger, "scheduler.job.add_failed", level="error", job_id=job_id, error=str(e))
         raise e
 
 def remove_job_from_scheduler(job_id):
     try:
         scheduler.remove_job(job_id)
-        print(f"Successfully removed job {job_id} from scheduler")
+        log_event(logger, "scheduler.job.removed", job_id=job_id)
     except Exception as e:
-        print(f"Error removing job {job_id}: {e}")
-
+        log_event(logger, "scheduler.job.remove_failed", level="error", job_id=job_id, error=str(e))
 def execute_job(job_id):
     """
     Common entry point for scheduled jobs.

@@ -10,9 +10,9 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Tool
 
 from app.agents.state import AgentState
 from app.agents.llm_client import llm_client
-from app.agents.node_helpers import analyze_tool_necessity, tool_aware
-from app.common.constant import ToolCallState
+import time
 
+from app.utils.logging_utils import get_logger, log_event, preview_text
 
 CHAT_SYSTEM_PROMPT = """You are a helpful and encouraging Gamified Life Assistant.
 
@@ -26,6 +26,8 @@ Keep your tone friendly, upbeat, and gamified (e.g., use terms like "player", "q
 """
 
 async def chat_node(state: AgentState) -> AgentState:
+    logger = get_logger(__name__)
+
     user_input = state["user_input"]
     profile = state.get("user_profile", {})
     if profile:
@@ -57,9 +59,27 @@ async def chat_node(state: AgentState) -> AgentState:
         clean_history.append(msg)
 
     messages = clean_history + [SystemMessage(content=CHAT_SYSTEM_PROMPT),HumanMessage(content=user_input)]
+    llm_start = time.perf_counter()
+    log_event(
+        logger,
+        "agent.chat.llm.request",
+        user_id=state.get("user_id"),
+        history_size=len(clean_history),
+        user_input_preview=preview_text(state.get("user_input")),
+        preview=True
+    )
 
     # Use llm (without tools) to prevent chat agent from generating unhandled tool calls
-    response = await llm_client.llm.ainvoke(messages)
+    response = await llm_client.llm_with_tools.ainvoke(messages)
+
+    log_event(
+        logger,
+        "agent.chat.llm.response",
+        user_id=state.get("user_id"),
+        duration_ms=int((time.perf_counter() - llm_start) * 1000),
+        response_preview=preview_text(getattr(response, "content", "")),
+        tool_calls_count=len(getattr(response, "tool_calls", []) or []),
+    )
 
     return {
         "messages": [response],
