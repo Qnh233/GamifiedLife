@@ -299,6 +299,8 @@ GamifiedLife/
 - [ ] 实现自定义奖励（通过chat触发工具并加入奖池）
   - [ ] 设计奖励生成工具（输入用户状态，输出奖励建议，根据用户行为和目标）
   - [ ] 将奖励生成工具集成到 Planner 或 Reward Agent 中
+- [ ] 实现 OpenTelemetry全链路监控
+- [ ] 加入Redis 以及 ES 以支持更复杂的状态管理和搜索功能
 ## License
 
 MIT License
