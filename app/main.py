@@ -1,7 +1,19 @@
 """
 Flask application for Gamified Life Engine
 """
-import time
+# app/main.py
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+
+# 1. 设置全局 Tracer
+resource = Resource(attributes={SERVICE_NAME: "gamified-life-engine"})
+provider = TracerProvider(resource=resource)
+processor = BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317"))
+provider.add_span_processor(processor)
+trace.set_tracer_provider(provider)
 import uuid
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
@@ -16,9 +28,13 @@ from app.scheduler_service import init_scheduler, add_job_to_scheduler, remove_j
 from app.database.services import save_agent_result
 from app.utils.logging_utils import get_logger, setup_logging, log_event
 import time
+
 def create_app():
     app = Flask(__name__)
     app.config.from_object(config)
+    # 3. 开启 Flask 自动插桩
+    from opentelemetry.instrumentation.flask import FlaskInstrumentor
+    FlaskInstrumentor().instrument_app(app)
 
     CORS(app, supports_credentials=True)
     
@@ -28,7 +44,8 @@ def create_app():
         db.create_all()  # 1. 如果表不存在，创建表
         init_default_data() # 2. 确保基础配置数据（如成就列表）已填入
         init_scheduler(app) # 3. Initialize scheduler
-
+        from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+        SQLAlchemyInstrumentor().instrument(engine=db.engine)
     register_routes(app)
     setup_logging()
     return app

@@ -6,7 +6,8 @@ from langchain_community.chat_models import ChatLiteLLM
 from app.config import config
 from app.mcp.mcp_tools import agent_tools
 
-
+import litellm
+litellm.callbacks = ["otel"]  # 如果你确实要 LiteLLM otel
 class UnifiedLLMClient:
     def __init__(self):
         # 初始化 LiteLLM 封装器

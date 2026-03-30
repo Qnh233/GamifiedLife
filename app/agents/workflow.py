@@ -24,6 +24,11 @@ from app.mcp.mcp_tools import agent_tools
 
 import logging
 from app.utils.logging_utils import get_logger, log_event
+# app/agents/workflow.py 顶部
+from openinference.instrumentation.langchain import LangChainInstrumentor
+
+# 一键对 LangChain/LangGraph 组件插桩
+LangChainInstrumentor().instrument()
 
 def create_workflow() -> CompiledStateGraph:
     def timed_node(node_name, node_fn):

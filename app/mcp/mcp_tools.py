@@ -7,6 +7,9 @@ from app.mcp.client import mcp_client  # 你的原始 MCP 客户端
 import time
 from app.utils.logging_utils import get_logger, log_event, preview_text
 logger = get_logger(__name__)
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
 
 # 1. 显式包装你的 MCP 工具。
 # 注意：Docstring (注释) 和参数类型 (Type Hints) 极其重要，LLM 全靠它们来做决策！
@@ -20,20 +23,24 @@ async def get_user_gaming_status(
     获取用户的**当前**游戏化状态，包括等级(level)、经验值(exp)和当前任务(tasks)。
     当用户询问自己**最新**的的进度或状态时调用此工具。
     """
-    # 1. 从 config 中安全获取 user_id
-    # RangeChain 会自动忽略类型为 RunnableConfig 的参数，不会将其发给 LLM
-    configuration = config["configurable"]
-    user_id = configuration.get("user_id")
-    log_event(logger, "mcp.tool.get_user_gaming_status", user_id=user_id)
-    if not user_id:
-        return "错误: 无法确定当前用户身份 (Context missing user_id)。请联系管理员检查系统配置。"
-    try:
-        # 这里直接调用你现有的 MCP 客户端逻辑
-        result = await mcp_client.call_tool("get_user_gaming_status", user_id=user_id)
-        return str(result)
-    except Exception as e:
-        log_event(logger, "mcp.tool.get_user_gaming_status_failed", user_id=user_id, error=str(e))
-        return f"查询状态失败: {str(e)}"
+    with tracer.start_as_current_span("get_user_gaming_status") as span:
+        span.set_attribute("level", "info")
+        # 1. 从 config 中安全获取 user_id
+        # RangeChain 会自动忽略类型为 RunnableConfig 的参数，不会将其发给 LLM
+        configuration = config["configurable"]
+        user_id = configuration.get("user_id")
+        log_event(logger, "mcp.tool.get_user_gaming_status", user_id=user_id)
+
+        if not user_id:
+            return "错误: 无法确定当前用户身份 (Context missing user_id)。请联系管理员检查系统配置。"
+        try:
+            # 这里直接调用你现有的 MCP 客户端逻辑
+            result = await mcp_client.call_tool("get_user_gaming_status", user_id=user_id)
+            span.set_attribute("getuser_result", result)
+            return str(result)
+        except Exception as e:
+            log_event(logger, "mcp.tool.get_user_gaming_status_failed", user_id=user_id, error=str(e))
+            return f"查询状态失败: {str(e)}"
 
 @tool
 async def get_current_date() -> str:
