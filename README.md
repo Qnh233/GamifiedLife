@@ -274,21 +274,6 @@ GamifiedLife/
 2. 实现 Agent Node 函数
 3. 在 `workflow.py` 中注册到 LangGraph
 
-### 添加新的奖励
-
-在 `app/database/models.py` 的 `DEFAULT_REWARDS` 列表中添加：
-
-```python
-{'id': 'new_reward', 'name': 'New Reward', 'description': '...', 'reward_type': 'item', 'value': 1, 'rarity': 'rare', 'icon': '🎁'}
-```
-
-### 添加新的成就
-
-在 `app/database/models.py` 的 `DEFAULT_ACHIEVEMENTS` 列表中添加：
-
-```python
-{'id': 'new_achievement', 'name': 'New Achievement', 'description': '...', 'icon': '🏅', 'target': 1}
-```
 # 计划
 - [ ] 设计用户属性经验条
 - [ ] 添加更多MCP工具

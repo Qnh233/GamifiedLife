@@ -8,6 +8,9 @@ from app.agents.llm_client import llm_client
 from app.database.models import ChatLog, User, db
 from app.config import config
 from app.agents.state import AgentState
+import time
+from app.utils.logging_utils import get_logger, log_event, preview_text
+logger = get_logger(__name__)
 
 PERSONA_DIR = "app/agents/personas"
 
@@ -57,8 +60,10 @@ async def run_reflector(user_id):
     """
     Main entry point for the Reflector Agent.
     """
-    print(f"[{datetime.now()}] Running Reflector for User {user_id}")
-    
+    start = time.perf_counter()
+    log_event(logger, "agent.reflector.start", user_id=user_id)
+
+
     # 1. Get recent history (e.g., last 50 messages)
     recent_logs = ChatLog.query.filter_by(user_id=user_id).order_by(ChatLog.created_at.desc()).limit(50).all()
     if not recent_logs:
@@ -77,9 +82,9 @@ async def run_reflector(user_id):
         HumanMessage(content=f"CURRENT PERSONA:\n{current_persona}\n\nRECENT HISTORY:\n{history_text}")
     ]
     
-    response = await llm_client.ainvoke(messages)
+    response = await llm_client.llm.ainvoke(messages)
     new_persona = response.content
-    
+
     # 4. Save
     save_persona_content(user_id, new_persona)
     
@@ -88,7 +93,13 @@ async def run_reflector(user_id):
     if user:
         user.last_reflection_at = datetime.now()
         db.session.commit()
-        
+    log_event(
+        logger,
+        "agent.reflector.completed",
+        user_id=user_id,
+        duration_ms=int((time.perf_counter() - start) * 1000),
+        persona_preview=preview_text(new_persona),
+    )
     return "Persona updated successfully."
 
 async def reflector_node(state: AgentState) -> AgentState:

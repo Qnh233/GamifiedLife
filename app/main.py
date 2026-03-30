@@ -1,22 +1,25 @@
 """
 Flask application for Gamified Life Engine
 """
+import time
 import uuid
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from datetime import datetime
+
+from sqlalchemy.orm import Session
+
 from app.config import config
 from app.database.models import db, User, Goal, Task, UserAchievement, UserReward, GameEvent, Achievement, Reward, ChatLog, init_default_data, ScheduledJob
 from app.agents.workflow import run_agent_workflow
 from app.scheduler_service import init_scheduler, add_job_to_scheduler, remove_job_from_scheduler
 from app.database.services import save_agent_result
-
-
-
+from app.utils.logging_utils import get_logger, setup_logging, log_event
+import time
 def create_app():
     app = Flask(__name__)
     app.config.from_object(config)
-    
+
     CORS(app, supports_credentials=True)
     
     db.init_app(app)
@@ -27,12 +30,13 @@ def create_app():
         init_scheduler(app) # 3. Initialize scheduler
 
     register_routes(app)
-    
+    setup_logging()
     return app
 
 
 def register_routes(app):
-    
+    logger = get_logger(__name__)
+
     @app.route('/')
     def index():
         return render_template('index.html')
@@ -52,9 +56,17 @@ def register_routes(app):
     
     @app.route('/api/chat', methods=['POST'])
     def chat():
+        start_ts = time.perf_counter()
         data = request.get_json()
         user_id = data.get('user_id')
         message = data.get('message')
+        log_event(
+            logger,
+            "chat.request.received",
+            user_id=user_id,
+            input_preview=message,
+            preview=True,
+        )
         
         if not user_id or not message:
             return jsonify({'error': 'user_id and message are required'}), 400
@@ -95,17 +107,39 @@ def register_routes(app):
         user_msg = ChatLog(id=str(uuid.uuid4()), user_id=user_id, role='user', content=message)
         db.session.add(user_msg)
         db.session.commit()
-
+        wf_start = time.perf_counter()
         try:
             result = loop.run_until_complete(
                 run_agent_workflow(user_id, message, user.to_dict(), goal_dict, tasks_list)
             )
         finally:
             loop.close()
-        
+        log_event(
+            logger,
+            "chat.workflow.completed",
+            user_id=user_id,
+            duration_ms=int((time.perf_counter() - wf_start) * 1000),
+            next_agent=result.get("next_agent"),
+            final_response_preview=result.get("final_response"),
+            preview=True,
+        )
+        db_start = time.perf_counter()
         # Save results to DB
         save_agent_result(user_id, result)
-        
+        log_event(
+            logger,
+            "chat.persistence.completed",
+            user_id=user_id,
+            duration_ms=int((time.perf_counter() - db_start) * 1000),
+        )
+
+        log_event(
+            logger,
+            "chat.request.completed",
+            user_id=user_id,
+            total_duration_ms=int((time.perf_counter() - start_ts) * 1000),
+        )
+
         return jsonify({
             'success': True,
             'agent': result.get('next_agent', 'unknown'),

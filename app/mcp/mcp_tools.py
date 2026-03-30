@@ -1,8 +1,12 @@
 from typing import Annotated
 
+from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool, InjectedToolArg
 from app.mcp.client import mcp_client  # 你的原始 MCP 客户端
+import time
+from app.utils.logging_utils import get_logger, log_event, preview_text
+logger = get_logger(__name__)
 
 # 1. 显式包装你的 MCP 工具。
 # 注意：Docstring (注释) 和参数类型 (Type Hints) 极其重要，LLM 全靠它们来做决策！
@@ -20,6 +24,7 @@ async def get_user_gaming_status(
     # RangeChain 会自动忽略类型为 RunnableConfig 的参数，不会将其发给 LLM
     configuration = config["configurable"]
     user_id = configuration.get("user_id")
+    log_event(logger, "mcp.tool.get_user_gaming_status", user_id=user_id)
     if not user_id:
         return "错误: 无法确定当前用户身份 (Context missing user_id)。请联系管理员检查系统配置。"
     try:
@@ -27,8 +32,30 @@ async def get_user_gaming_status(
         result = await mcp_client.call_tool("get_user_gaming_status", user_id=user_id)
         return str(result)
     except Exception as e:
+        log_event(logger, "mcp.tool.get_user_gaming_status_failed", user_id=user_id, error=str(e))
         return f"查询状态失败: {str(e)}"
 
+@tool
+async def get_current_date() -> str:
+    """获取当前日期，格式为 YYYY-MM-DD。"""
+    log_event(logger, "mcp.tool.get_current_date")
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d")
+
+@tool
+async def web_search(
+    query: str,
+)-> str:
+    """使用在线搜索互联网资料，返回搜索结果。
+    在用户或你认为需要实时消息或者网络资源的时候使用。
+    """
+    log_event(logger, "mcp.tool.web_search", query=query)
+    search = DuckDuckGoSearchRun()
+    start_time = time.time()
+    result = await search.arun(query)
+    end_time = time.time()
+    log_event(logger, "mcp.tool.web_search_success", query=query, result=result, duration=end_time-start_time)
+    return result
 
 # 将你需要暴露给这个 Agent 的工具放进一个列表
-agent_tools = [get_user_gaming_status]
+agent_tools = [get_user_gaming_status, get_current_date, web_search]

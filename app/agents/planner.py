@@ -14,7 +14,9 @@ from app.config import config
 from datetime import datetime
 import uuid
 
+from app.utils.logging_utils import log_event, get_logger
 
+logger = get_logger(__name__)
 PLANNER_SYSTEM_PROMPT = """You are the Planner Agent for the Gamified Life Engine.
 
 Your role is to break down user goals into specific, actionable daily tasks (quests).
@@ -100,7 +102,13 @@ User Profile Context:
         task_plan = parser.parse(content)
         response_data = task_plan.model_dump() if hasattr(task_plan, "model_dump") else task_plan
     except Exception as e:
-        print(f"[Planner Error] Failed to parse JSON: {content}\nError: {e}")
+        log_event(
+            logger,
+            "agent.planner.parse_error",
+            level="error",
+            content_preview=preview_text(content),
+            error=str(e),
+        )
         # 容错处理：如果解析失败，创建一个默认的空任务计划
         response_data = {
             "goal": {
