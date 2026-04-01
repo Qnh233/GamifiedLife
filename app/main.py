@@ -7,7 +7,7 @@ from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from datetime import datetime
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.config import config
 from app.database.models import db, User, Goal, Task, UserAchievement, UserReward, GameEvent, Achievement, Reward, ChatLog, init_default_data, ScheduledJob
@@ -263,8 +263,8 @@ def register_routes(app):
                 'message': 'Profile not found'
             }), 404
         
-        achievements = UserAchievement.query.filter_by(user_id=user_id).all()
-        rewards = UserReward.query.filter_by(user_id=user_id).all()
+        achievements = UserAchievement.query.filter_by(user_id=user_id).options(joinedload(UserAchievement.achievement)).all()
+        rewards = UserReward.query.filter_by(user_id=user_id).options(joinedload(UserReward.reward)).all()
         
         return jsonify({
             'exists': True,
