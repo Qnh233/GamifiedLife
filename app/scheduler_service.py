@@ -74,7 +74,7 @@ def execute_job(job_id):
         if not job or not job.is_active:
             return
 
-        print(f"Executing Job: {job.name} ({job.job_type}) for User {job.user_id}")
+        log_event(logger, "scheduler.job.executing", job_id=job.id, job_name=job.name, job_type=job.job_type, user_id=job.user_id)
         
         try:
             if job.job_type == 'reflector':
@@ -88,7 +88,8 @@ def execute_job(job_id):
             db.session.commit()
             
         except Exception as e:
-            print(f"Job execution failed: {e}")
+            log_event(logger, "scheduler.job.execution_failed", level="error", job_id=job_id, error=str(e))
+            db.session.rollback()
 
 async def trigger_chat_workflow(user_id, message):
     # Logic similar to /api/chat

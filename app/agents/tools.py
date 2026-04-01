@@ -4,6 +4,9 @@ Tools Node - Handles execution of tools via MCP
 from app.agents.state import AgentState
 from app.common.constant import ToolCallState
 from app.mcp.client import mcp_client
+from app.utils.logging_utils import get_logger, log_event, preview_text
+
+logger = get_logger(__name__)
 
 async def tools_node(state: AgentState) -> AgentState:
     tool_name = state.get("tool_name")
@@ -13,7 +16,7 @@ async def tools_node(state: AgentState) -> AgentState:
         state["tool_result"] = "Error: No tool specified."
         return state
 
-    print(f"🛠️ Executing Tool: {tool_name} with args: {tool_args}")
+    log_event(logger, "agent.tools.executing", tool_name=tool_name, tool_args=preview_text(tool_args))
 
     try:
         # Execute the tool using the MCP client
@@ -26,7 +29,7 @@ async def tools_node(state: AgentState) -> AgentState:
 
     except Exception as e:
         error_msg = f"Tool execution failed: {str(e)}"
-        print(error_msg)
+        log_event(logger, "agent.tools.execution_failed", level="error", tool_name=tool_name, error=str(e))
         state["tool_result"] = str(f"Tool {tool_name} execution failed: {error_msg}")
 
     # Clear the tool request to avoid loop, though graph routing should handle it

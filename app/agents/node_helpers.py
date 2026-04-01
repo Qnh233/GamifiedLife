@@ -8,6 +8,9 @@ from typing import Callable, Dict, Any
 from app.mcp.client import mcp_client
 from app.agents.llm_client import llm_client
 import json
+from app.utils.logging_utils import get_logger, log_event, preview_text
+
+logger = get_logger(__name__)
 
 def tool_aware(node_func: Callable) -> Callable:
     """装饰器：自动处理工具调用和返回"""
@@ -40,7 +43,7 @@ async def generate_tool_prompt() -> str:
     try:
         tools = await mcp_client.list_tools()
     except Exception as e:
-        print(f"Failed to list tools: {e}")
+        log_event(logger, "agent.node_helpers.list_tools_failed", level="error", error=str(e))
         return None
     if not tools:
         return None
@@ -53,7 +56,7 @@ async def generate_tool_prompt() -> str:
     # If no tools are available, return none
     if not tools_desc:
         return None
-    print(f"可调用工具列表:\n{tools_desc}")
+    log_event(logger, "agent.node_helpers.tools_listed", tools_count=len(tools))
     tools_prompt = "\n".join(tools_desc)
 
     tools_prompt.join("\n如果需要调用工具，请严格按照以下格式在响应中指定并且只回复工具调用json，其他信息不需要：")
@@ -136,7 +139,7 @@ async def analyze_tool_necessity(user_input: str, node_context: str = "") -> dic
     try:
         tools = await mcp_client.list_tools()
     except Exception as e:
-        print(f"Failed to list tools: {e}")
+        log_event(logger, "agent.node_helpers.list_tools_failed", level="error", error=str(e))
         return {"tool": "none"}
 
     tools_desc = []
@@ -182,5 +185,5 @@ async def analyze_tool_necessity(user_input: str, node_context: str = "") -> dic
 
         return intent
     except Exception as e:
-        print(f"Tool analysis failed: {e}")
+        log_event(logger, "agent.node_helpers.analysis_failed", level="error", error=str(e))
         return {"tool": "none"}
