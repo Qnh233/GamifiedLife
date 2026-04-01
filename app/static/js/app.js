@@ -141,23 +141,75 @@ async function sendMessage() {
     appendMessage(message, 'user');
     input.value = '';
 
+    const box = document.getElementById('chat-box');
+    const msg = document.createElement('div');
+    msg.className = `chat-message agent`;
+    
+    const thoughtsDiv = document.createElement('div');
+    thoughtsDiv.className = 'thoughts-container';
+    thoughtsDiv.style.fontSize = '0.85em';
+    thoughtsDiv.style.color = '#666';
+    thoughtsDiv.style.marginBottom = '8px';
+    thoughtsDiv.style.padding = '8px';
+    thoughtsDiv.style.backgroundColor = '#f0f0f0';
+    thoughtsDiv.style.borderRadius = '4px';
+    thoughtsDiv.style.borderLeft = '3px solid #007bff';
+    thoughtsDiv.innerHTML = '<strong>Thinking Process:</strong><br/>';
+    msg.appendChild(thoughtsDiv);
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'content-container';
+    msg.appendChild(contentDiv);
+    
+    box.appendChild(msg);
+    box.scrollTop = box.scrollHeight;
+
     try {
-        const res = await fetch('/api/chat', {
+        const res = await fetch('/api/chat/stream', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ user_id: userId, message: message })
         });
 
-        const data = await res.json();
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder("utf-8");
 
-        if (data.success) {
-            appendMessage(data.message || "Action processed.", 'agent');
-            loadData(); // Refresh UI
-        } else {
-            appendMessage("Error processing request.", 'agent-error');
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n\n');
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const dataStr = line.replace('data: ', '');
+                    if (!dataStr) continue;
+                    try {
+                        const data = JSON.parse(dataStr);
+                        if (data.error) {
+                            contentDiv.innerHTML += `<br/><span style="color:red">${data.error}</span>`;
+                        } else if (data.type === 'update') {
+                            for (const [node, eventStr] of Object.entries(data.data)) {
+                                thoughtsDiv.innerHTML += `<div><span style="color:#007bff">[${node}]</span> ${eventStr}</div>`;
+                            }
+                            box.scrollTop = box.scrollHeight;
+                        } else if (data.type === 'done') {
+                            if (typeof marked !== 'undefined') {
+                                contentDiv.innerHTML = marked.parse(data.final_response || "Action processed.");
+                            } else {
+                                contentDiv.textContent = data.final_response || "Action processed.";
+                            }
+                            box.scrollTop = box.scrollHeight;
+                            loadData(); // Refresh UI after completion
+                        }
+                    } catch (e) {
+                        console.error("Error parsing SSE data", e, dataStr);
+                    }
+                }
+            }
         }
     } catch (e) {
-        appendMessage("Network error.", 'agent-error');
+        console.error("Chat error", e);
+        contentDiv.innerHTML = "Error: " + e.message;
     }
 }
 

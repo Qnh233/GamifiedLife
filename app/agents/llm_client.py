@@ -15,7 +15,8 @@ class UnifiedLLMClient:
             model=config.DEFAULT_MODEL,  # 例如: "gpt-4o-mini" 或 "qwen-max"
             temperature=0.7,
             # 开启这个参数，LiteLLM 会自动剔除提供商 API 不支持的参数（如非法的 tool_choice）
-            drop_params=True
+            drop_params=True,
+            streaming=True,
         )
         # 核心步骤：将 Python 工具绑定到 LLM。
         # 这样 LLM 就具备了输出原生 tool_calls 的能力

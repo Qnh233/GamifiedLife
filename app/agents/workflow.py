@@ -133,8 +133,8 @@ def create_workflow() -> CompiledStateGraph:
     workflow.add_edge("reward", "response")
 
     # Change flow to include reflection after response
-    workflow.add_edge("response", "reflector")
-    workflow.add_edge("reflector", END)
+    # workflow.add_edge("response", "reflector")
+    workflow.add_edge("response", END)
     
     return workflow.compile(checkpointer=memory_saver)
 
@@ -150,3 +150,13 @@ async def run_agent_workflow(user_id: str, user_input: str, user_profile=None, c
                                           'thread_id': f"{user_id}"})
     final_state = await workflow.ainvoke(initial_state, config=config)
     return final_state
+
+async def stream_agent_workflow(user_id: str, user_input: str, user_profile=None, current_goal=None, current_tasks=None):
+    initial_state = create_initial_state(user_id, user_input, current_goal, current_tasks)
+    if user_profile:
+        initial_state["user_profile"] = user_profile
+    config = RunnableConfig(configurable={'user_id': user_id,
+                                          'thread_id': f"{user_id}"})
+    async for event in workflow.astream(initial_state, stream_mode="updates", config=config):
+        yield event
+

@@ -11,11 +11,14 @@ from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 # 1. 设置全局 Tracer
 resource = Resource(attributes={SERVICE_NAME: "gamified-life-engine"})
 provider = TracerProvider(resource=resource)
-processor = BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317"))
+processor = BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317",insecure=True))
 provider.add_span_processor(processor)
 trace.set_tracer_provider(provider)
 import uuid
-from flask import Flask, request, jsonify, render_template
+import json
+import queue
+import threading
+from flask import Flask, request, jsonify, render_template, Response
 from flask_cors import CORS
 from datetime import datetime
 
@@ -168,6 +171,114 @@ def register_routes(app):
                 'game_events': [e for e in result.get('game_events', [])]
             }
         })
+
+    @app.route('/api/chat/stream', methods=['POST'])
+    def chat_stream():
+        start_ts = time.perf_counter()
+        data = request.get_json()
+        user_id = data.get('user_id')
+        message = data.get('message')
+        log_event(
+            logger,
+            "chat_stream.request.received",
+            user_id=user_id,
+            input_preview=message,
+            preview=True,
+        )
+        if not user_id or not message:
+            return jsonify({'error': 'user_id and message are required'}), 400
+
+        user = User.query.get(user_id)
+        if not user:
+            user = User(
+                id=user_id,
+                username=f"User_{user_id[:8]}",
+                xp_to_next_level=1000
+            )
+            db.session.add(user)
+            db.session.commit()
+            
+            from app.database.models import Achievement, UserAchievement
+            for ach in Achievement.query.all():
+                user_ach = UserAchievement(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    achievement_id=ach.id,
+                    progress=0,
+                    unlocked=False
+                )
+                db.session.add(user_ach)
+            db.session.commit()
+            
+        current_goal = Goal.query.filter_by(user_id=user_id, status='active').first()
+        current_tasks = Task.query.filter_by(user_id=user_id, status='pending').all()
+
+        goal_dict = current_goal.to_dict() if current_goal else None
+        tasks_list = [t.to_dict() for t in current_tasks]
+
+        user_msg = ChatLog(id=str(uuid.uuid4()), user_id=user_id, role='user', content=message)
+        db.session.add(user_msg)
+        db.session.commit()
+
+        q = queue.Queue()
+        user_dict = user.to_dict()
+        app_context = app.app_context() # get app context
+
+        def run_streaming_workflow():
+            from app.agents.workflow import stream_agent_workflow
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def worker():
+                final_state = None
+                try:
+                    async for event in stream_agent_workflow(user_id, message, user_dict, goal_dict, tasks_list):
+                        q.put(("event", event))
+                        for node_name, state_update in event.items():
+                            if isinstance(state_update, dict):
+                                final_state = {**(final_state or {}), **state_update}
+                except Exception as e:
+                    q.put(("error", str(e)))
+                else:
+                    q.put(("done", final_state))
+                    
+            try:
+                loop.run_until_complete(worker())
+            finally:
+                loop.close()
+
+        threading.Thread(target=run_streaming_workflow).start()
+
+        def generate():
+            with app_context:
+                while True:
+                    item_type, item_data = q.get()
+                    if item_type == "error":
+                        yield f"data: {json.dumps({'error': item_data})}\n\n"
+                        break
+                    elif item_type == "done":
+                        if item_data:
+                            save_agent_result(user_id, item_data)
+                            yield f"data: {json.dumps({'type': 'done', 'final_response': item_data.get('final_response', '')})}\n\n"
+                        break
+                    elif item_type == "event":
+                        # Convert event contents to string or serialize
+                        event_dict = {}
+                        for node_name, state_update in item_data.items():
+                            event_msg = f"Agent [{node_name}] executed."
+                            # try to extract a thought or ai message if possible
+                            if "messages" in state_update and state_update["messages"]:
+                                last_msg = state_update["messages"][-1]
+                                if hasattr(last_msg, "content") and last_msg.content:
+                                    event_msg = f"[{node_name}]: {last_msg.content[:200]}..."
+                                    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                                        event_msg += f" (calling {len(last_msg.tool_calls)} tools)"
+                            event_dict[node_name] = event_msg
+                            
+                        yield f"data: {json.dumps({'type': 'update', 'data': event_dict})}\n\n"
+
+        return Response(generate(), mimetype='text/event-stream')
     
     @app.route('/api/tasks/complete/<task_id>', methods=['POST'])
     def complete_task(task_id):
