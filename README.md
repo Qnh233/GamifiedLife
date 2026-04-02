@@ -290,7 +290,7 @@ GamifiedLife/
 
 # 展示
 ![img_1.png](assert/img_1.png)
-![img.png](assert/img.png)
+![img_2.png](assert/img_2.png)
 ## License
 
 MIT License
