@@ -82,8 +82,6 @@ async def supervisor_node(state: AgentState) -> AgentState:
         }
     
     # Return delta update instead of modifying state in-place
-    # print(f"Supervisor decided to route to: \-\> {str(response_data.get('decision', 'CHAT')).upper()}")
-    # print("=====================================\n")
     log_event(
         logger,
         "agent.supervisor.route_decision",
