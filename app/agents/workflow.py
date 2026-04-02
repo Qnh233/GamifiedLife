@@ -31,50 +31,22 @@ from openinference.instrumentation.langchain import LangChainInstrumentor
 LangChainInstrumentor().instrument()
 
 def create_workflow() -> CompiledStateGraph:
-    def timed_node(node_name, node_fn):
-        async def _wrapped(state, *args, **kwargs):
-            start = time.perf_counter()
-            user_id = state.get("user_id") if isinstance(state, dict) else None
-            log_event(logger, "workflow.node.start", user_id=user_id, node=node_name)
-            try:
-                result = await node_fn(state, *args, **kwargs)
-                return result
-            except Exception as e:
-                log_event(
-                    logger,
-                    "workflow.node.error",
-                    level="error",
-                    user_id=user_id,
-                    node=node_name,
-                    error=str(e),
-                )
-                raise
-            finally:
-                log_event(
-                    logger,
-                    "workflow.node.end",
-                    user_id=user_id,
-                    node=node_name,
-                    duration_ms=int((time.perf_counter() - start) * 1000),
-                )
-
-        return _wrapped
 
     logger = get_logger(__name__)
     memory_saver = MemorySaver()
     workflow = StateGraph(AgentState)
     # 监督节点
-    workflow.add_node("supervisor", timed_node("supervisor", supervisor_node))
+    workflow.add_node("supervisor", supervisor_node)
     # 规划 处理规划任务
-    workflow.add_node("planner", timed_node("planner", planner_node))
+    workflow.add_node("planner", planner_node)
     # 奖励节点 处理奖励计算和生成奖励消息
-    workflow.add_node("reward", timed_node("reward", reward_node))
+    workflow.add_node("reward",  reward_node)
     # 查询节点 处理用户查询和信息检索
-    workflow.add_node("query", timed_node("query", query_node))
+    workflow.add_node("query",  query_node)
     # 聊天节点 处理用户与智能体的直接对话
-    workflow.add_node("chat", timed_node("chat", chat_node))
+    workflow.add_node("chat", chat_node)
     # 反思节点 处理用户画像更新
-    workflow.add_node("reflector", timed_node("reflector", reflector_node))
+    workflow.add_node("reflector",  reflector_node)
     # 响应节点 统一处理所有路径的最终响应生成
     workflow.add_node("response", lambda state: state)
 
@@ -115,9 +87,9 @@ def create_workflow() -> CompiledStateGraph:
     chat_tools_node = ToolNode(agent_tools)
 
     # 2. 分别添加到图中
-    workflow.add_node("query_tools", timed_node("query_tools", query_tools_node))
-    workflow.add_node("chat_tools", timed_node("chat_tools", chat_tools_node))
-    workflow.add_node("planner_tools", timed_node("planner_tools", planner_tools_node))
+    workflow.add_node("query_tools",  query_tools_node)
+    workflow.add_node("chat_tools",  chat_tools_node)
+    workflow.add_node("planner_tools", planner_tools_node)
 
     # 3. 各自绑定自己的条件边和返回边 (形成独立的小闭环)
     workflow.add_conditional_edges("query", tools_condition, {"tools": "query_tools", "response": "response"})

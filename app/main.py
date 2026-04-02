@@ -251,6 +251,7 @@ def register_routes(app):
         threading.Thread(target=run_streaming_workflow).start()
 
         def generate():
+            total_tokens = 0
             with app_context:
                 while True:
                     item_type, item_data = q.get()
@@ -260,20 +261,45 @@ def register_routes(app):
                     elif item_type == "done":
                         if item_data:
                             save_agent_result(user_id, item_data)
-                            yield f"data: {json.dumps({'type': 'done', 'final_response': item_data.get('final_response', '')})}\n\n"
+                            final_resp = item_data.get('final_response', '')
+                            # Add the token widget
+                            if total_tokens > -1: # Always append to test
+                                final_resp += f"\n\n> 📊 **Token loss~**\n> 本次调用的总Token为: **{total_tokens}**"
+                            yield f"data: {json.dumps({'type': 'done', 'final_response': final_resp})}\n\n"
                         break
                     elif item_type == "event":
                         # Convert event contents to string or serialize
                         event_dict = {}
                         for node_name, state_update in item_data.items():
                             event_msg = f"Agent [{node_name}] executed."
-                            # try to extract a thought or ai message if possible
                             if "messages" in state_update and state_update["messages"]:
                                 last_msg = state_update["messages"][-1]
-                                if hasattr(last_msg, "content") and last_msg.content:
-                                    event_msg = f"[{node_name}]: {last_msg.content[:200]}..."
-                                    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                                        event_msg += f" (calling {len(last_msg.tool_calls)} tools)"
+                                
+                                # Use universal extractor for message or dict
+                                try:
+                                    if hasattr(last_msg, "usage_metadata") and last_msg.usage_metadata:
+                                        total_tokens += last_msg.usage_metadata.get('total_tokens', 0)
+                                    elif hasattr(last_msg, "response_metadata") and last_msg.response_metadata and "token_usage" in last_msg.response_metadata:
+                                        total_tokens += last_msg.response_metadata["token_usage"].get('total_tokens', 0)
+                                    elif isinstance(last_msg, dict) and "usage_metadata" in last_msg:
+                                        total_tokens += last_msg["usage_metadata"].get('total_tokens', 0)
+                                    elif isinstance(last_msg, dict) and "response_metadata" in last_msg and "token_usage" in last_msg["response_metadata"]:
+                                        total_tokens += last_msg["response_metadata"]["token_usage"].get('total_tokens', 0)
+                                except Exception:
+                                    pass
+
+                                content = getattr(last_msg, "content", last_msg.get("content", "") if isinstance(last_msg, dict) else "")
+                                if content:
+                                    event_msg = f"[{node_name}]: {str(content)[:200]}..."
+                                
+                                tool_calls = getattr(last_msg, "tool_calls", last_msg.get("tool_calls", []) if isinstance(last_msg, dict) else [])
+                                if tool_calls:
+                                    try:
+                                        tool_names = [tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "unknown") for tc in tool_calls]
+                                        event_msg += f" (calling tools: {', '.join(tool_names)})"
+                                    except Exception:
+                                        event_msg += f" (calling {len(tool_calls)} tools)"
+                                        
                             event_dict[node_name] = event_msg
                             
                         yield f"data: {json.dumps({'type': 'update', 'data': event_dict})}\n\n"

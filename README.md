@@ -276,16 +276,21 @@ GamifiedLife/
 
 # 计划
 - [ ] 设计用户属性经验条
+- [x] agent链路流输出
 - [ ] 添加更多MCP工具
   - [ ] 日历工具
-  - [ ] 待办事项工具
+  - [x] 网络搜索工具
   - [ ] GitHub 提交工具
   - [ ] 获取位置 工具 
 - [ ] 实现自定义奖励（通过chat触发工具并加入奖池）
   - [ ] 设计奖励生成工具（输入用户状态，输出奖励建议，根据用户行为和目标）
   - [ ] 将奖励生成工具集成到 Planner 或 Reward Agent 中
-- [ ] 实现 OpenTelemetry全链路监控
+- [x] 实现 OpenTelemetry全链路监控
 - [ ] 加入Redis 以及 ES 以支持更复杂的状态管理和搜索功能
+
+# 展示
+![img_1.png](assert/img_1.png)
+![img.png](assert/img.png)
 ## License
 
 MIT License
