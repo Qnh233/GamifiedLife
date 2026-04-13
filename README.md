@@ -39,6 +39,7 @@
 
 ```bash
 pip install -r requirements.txt
+pip install alembic
 ```
 
 ### 3. 配置环境变量
@@ -66,6 +67,12 @@ DEFAULT_MODEL=gpt-4
 
 ```sql
 CREATE DATABASE gamified_life CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+### 4.1 执行数据库迁移（Alembic）
+
+```bash
+alembic upgrade head
 ```
 
 ### 5. 启动服务
@@ -98,11 +105,15 @@ python -m app.mcp.server
 
 | 方法 | 路径 | 描述 |
 |------|------|------|
+| POST | `/api/auth/register` | 注册并创建会话 |
+| POST | `/api/auth/login` | 登录并创建会话 |
+| POST | `/api/auth/logout` | 退出登录并销毁会话 |
+| GET | `/api/auth/me` | 获取当前会话用户 |
 | POST | `/api/chat` | 与 Agent 对话 |
-| GET | `/api/profile/<user_id>` | 获取用户资料 |
-| GET | `/api/goals/<user_id>` | 获取用户目标 |
-| GET | `/api/tasks/<user_id>` | 获取用户任务 |
-| GET | `/api/events/<user_id>` | 获取游戏事件 |
+| GET | `/api/me/profile` | 获取当前会话用户资料 |
+| GET | `/api/me/goals` | 获取当前会话用户目标 |
+| GET | `/api/me/tasks` | 获取当前会话用户任务 |
+| GET | `/api/me/events` | 获取当前会话用户事件 |
 
 ### 任务接口
 
@@ -122,18 +133,30 @@ python -m app.mcp.server
 | 方法 | 路径 | 描述 |
 |------|------|------|
 | POST | `/api/schedules` | 创建定时任务（`chat`/`reflector`） |
-| GET | `/api/schedules/<user_id>` | 获取用户定时任务 |
+| GET | `/api/me/schedules` | 获取当前会话用户定时任务 |
 | DELETE | `/api/schedules/<job_id>` | 删除定时任务 |
 
 ## API 使用示例
 
-### 1. 创建用户/发送消息
+### 1. 注册并登录（会话模式）
+
+```bash
+curl -X POST http://localhost:5000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "demo_user",
+    "password": "demo123456"
+  }' \
+  -c cookies.txt
+```
+
+### 2. 发送消息（使用会话 Cookie）
 
 ```bash
 curl -X POST http://localhost:5000/api/chat \
   -H "Content-Type: application/json" \
+  -b cookies.txt \
   -d '{
-    "user_id": "user-123",
     "message": "这周我要搞定遥感论文的初稿，还要健身三次"
   }'
 ```
@@ -168,12 +191,13 @@ curl -X POST http://localhost:5000/api/chat \
 }
 ```
 
-### 2. 完成任务
+### 3. 完成任务
 
 ```bash
 curl -X POST http://localhost:5000/api/tasks/complete/task-xxx \
   -H "Content-Type: application/json" \
-  -d '{"user_id": "user-123"}'
+  -b cookies.txt \
+  -d '{}'
 ```
 
 响应示例：
@@ -197,10 +221,10 @@ curl -X POST http://localhost:5000/api/tasks/complete/task-xxx \
 }
 ```
 
-### 3. 获取用户资料
+### 4. 获取用户资料
 
 ```bash
-curl http://localhost:5000/api/profile/user-123
+curl -b cookies.txt http://localhost:5000/api/me/profile
 ```
 
 ## 游戏机制

@@ -1,20 +1,44 @@
-let userId = localStorage.getItem('user_id');
+let userId = null;
+
+async function apiFetch(url, options = {}) {
+    const mergedOptions = {
+        credentials: 'include',
+        ...options,
+        headers: {
+            ...(options.headers || {})
+        }
+    };
+    const res = await fetch(url, mergedOptions);
+    if (res.status === 401) {
+        window.location.href = '/login';
+        throw new Error('Unauthorized');
+    }
+    return res;
+}
 
 document.addEventListener('DOMContentLoaded', () => {
-    if (!userId) {
-        new bootstrap.Modal('#loginModal').show();
-    } else {
-        loadData();
-    }
+    initializeSession();
 });
 
-function login() {
-    const input = document.getElementById('login-user-id').value.trim();
-    if (input) {
-        userId = input;
-        localStorage.setItem('user_id', userId);
-        loadData();
-        bootstrap.Modal.getInstance(document.getElementById('loginModal')).hide();
+async function initializeSession() {
+    try {
+        const res = await apiFetch('/api/auth/me');
+        const data = await res.json();
+        userId = data.user.id;
+        document.getElementById('current-user-label').textContent = data.user.username;
+        await loadData();
+    } catch (error) {
+        if (error.message !== 'Unauthorized') {
+            console.error('Session bootstrap failed', error);
+        }
+    }
+}
+
+async function logout() {
+    try {
+        await apiFetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+        window.location.href = '/login';
     }
 }
 
@@ -36,12 +60,12 @@ async function loadData() {
 
 async function fetchProfile() {
     try {
-        const res = await fetch(`/api/profile/${userId}`);
+        const res = await apiFetch('/api/me/profile');
         const data = await res.json();
 
         if (data.exists) {
             updateProfile(data.profile);
-            updateGoal(data.profile.id); // Hack: need goal endpoint, but we can reuse this flow
+            updateGoal();
         } else {
             // First time logic handled by chat
         }
@@ -64,7 +88,7 @@ function updateProfile(profile) {
 }
 
 async function fetchTasks() {
-    const res = await fetch(`/api/tasks/${userId}?status=pending`);
+    const res = await apiFetch('/api/me/tasks?status=pending');
     const data = await res.json();
     const taskList = document.getElementById('task-list');
     taskList.innerHTML = '';
@@ -98,7 +122,7 @@ function getDifficultyColor(diff) {
 }
 
 async function fetchEvents() {
-    const res = await fetch(`/api/events/${userId}?limit=10`);
+    const res = await apiFetch('/api/me/events?limit=10');
     const data = await res.json();
     const list = document.getElementById('events-list');
     list.innerHTML = '';
@@ -113,8 +137,8 @@ async function fetchEvents() {
 }
 
 // Update Goal - separate function not fully implemented in API yet properly
-async function updateGoal(userId) {
-    const res = await fetch(`/api/goals/${userId}`);
+async function updateGoal() {
+    const res = await apiFetch('/api/me/goals');
     const data = await res.json();
     const container = document.getElementById('current-goal-container');
 
@@ -165,10 +189,10 @@ async function sendMessage() {
     box.scrollTop = box.scrollHeight;
 
     try {
-        const res = await fetch('/api/chat/stream', {
+        const res = await apiFetch('/api/chat/stream', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ user_id: userId, message: message })
+            body: JSON.stringify({ message: message })
         });
 
         const reader = res.body.getReader();
@@ -229,10 +253,10 @@ function appendMessage(text, type) {
 // Task Completion
 async function completeTask(taskId) {
     try {
-        const res = await fetch(`/api/tasks/complete/${taskId}`, {
+        const res = await apiFetch(`/api/tasks/complete/${taskId}`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ user_id: userId })
+            body: JSON.stringify({})
         });
 
         const data = await res.json();
@@ -251,7 +275,7 @@ async function completeTask(taskId) {
 // Schedules
 async function fetchSchedules() {
     try {
-        const res = await fetch(`/api/schedules/${userId}`);
+        const res = await apiFetch('/api/me/schedules');
         const data = await res.json();
         const tbody = document.getElementById('schedule-list');
         tbody.innerHTML = '';
@@ -291,11 +315,10 @@ async function createSchedule() {
     }
     
     try {
-        const res = await fetch('/api/schedules', {
+        const res = await apiFetch('/api/schedules', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                user_id: userId,
                 name: name,
                 job_type: type,
                 cron_expression: cron,
@@ -328,7 +351,7 @@ async function createSchedule() {
 async function deleteSchedule(jobId) {
     if (!confirm('Are you sure you want to delete this schedule?')) return;
     try {
-        await fetch(`/api/schedules/${jobId}`, { method: 'DELETE' });
+        await apiFetch(`/api/schedules/${jobId}`, { method: 'DELETE' });
         fetchSchedules();
     } catch (e) {
         console.error(e);

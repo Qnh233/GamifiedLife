@@ -5,3 +5,9 @@
 __pycache__/
 *.py[cod]
 /.github
+.prod.env
+Dockerfile
+Dockerfile
+/migrations
+docker-compose.prod.yml
+docker-compose.yml

@@ -2,7 +2,7 @@
 Gamified Life-Agent Engine Configuration
 """
 import os
-from typing import Optional
+from datetime import timedelta
 from dotenv import load_dotenv
 
 # 加载 .env 文件
@@ -65,6 +65,13 @@ class Config:
     # Flask Configuration
     HOST = os.environ.get('HOST', '0.0.0.0')
     PORT = int(os.environ.get('PORT', 5000))
+
+    # Session Configuration
+    SESSION_PERMANENT = True
+    PERMANENT_SESSION_LIFETIME = timedelta(hours=int(os.environ.get('SESSION_LIFETIME_HOURS', 24)))
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = os.environ.get('SESSION_COOKIE_SAMESITE', 'Lax')
+    SESSION_COOKIE_SECURE = os.environ.get('SESSION_COOKIE_SECURE', 'false').lower() == 'true'
     
     # Game Mechanics
     BASE_XP_PER_TASK = int(os.environ.get('BASE_XP_PER_TASK', 100))

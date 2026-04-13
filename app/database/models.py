@@ -22,6 +22,9 @@ class User(Base):
     
     id = db.Column(db.String(36), primary_key=True)
     username = db.Column(db.String(100), nullable=False)
+    password_hash = db.Column(db.String(255), nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
+    last_login_at = db.Column(db.DateTime, nullable=True)
     level = db.Column(db.Integer, default=1) # 当前等级
     total_xp = db.Column(db.Integer, default=0) # 总经验
     current_xp = db.Column(db.Integer, default=0) # 当前经验
@@ -55,6 +58,8 @@ class User(Base):
             'tasks_completed': self.tasks_completed,
             'goals_completed': self.goals_completed,
             'challenges_completed': self.challenges_completed,
+            'is_active': self.is_active,
+            'last_login_at': self.last_login_at.isoformat() if self.last_login_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
@@ -300,3 +305,5 @@ def init_default_data():
             db.session.add(reward)
     
     db.session.commit()
+
+

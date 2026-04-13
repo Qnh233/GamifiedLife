@@ -11,6 +11,13 @@
 </head>
 <body>
     <div class="container-fluid">
+        <div class="d-flex justify-content-between align-items-center mt-3">
+            <h4 class="mb-0">Gamified Life</h4>
+            <div>
+                <span class="me-3 text-muted">当前账号：<strong id="current-user-label">-</strong></span>
+                <button class="btn btn-outline-danger btn-sm" onclick="logout()">退出登录</button>
+            </div>
+        </div>
         <div class="row mt-3">
             <!-- Sidebar / Profile -->
             <div class="col-md-3">
@@ -117,26 +124,6 @@
                             <button class="btn btn-primary" onclick="sendMessage()">Send</button>
                         </div>
                     </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Login Modal -->
-    <div class="modal fade" id="loginModal" tabindex="-1" data-bs-backdrop="static">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Welcome Back, Hero</h5>
-                </div>
-                <div class="modal-body">
-                    <div class="mb-3">
-                        <label for="login-user-id" class="form-label">User ID</label>
-                        <input type="text" class="form-control" id="login-user-id" placeholder="Enter your ID (e.g., u123)">
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-primary" onclick="login()">Start Adventure</button>
                 </div>
             </div>
         </div>

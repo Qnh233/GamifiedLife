@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - Gamified Life</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+    <div class="container py-5">
+        <div class="row justify-content-center">
+            <div class="col-md-5 col-lg-4">
+                <div class="card shadow-sm">
+                    <div class="card-body p-4">
+                        <h4 class="text-center mb-3">Gamified Life</h4>
+                        <p class="text-muted text-center mb-4">登录后可访问你的专属任务和会话</p>
+
+                        <div class="mb-3">
+                            <label for="username" class="form-label">用户名</label>
+                            <input id="username" type="text" class="form-control" placeholder="请输入用户名">
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="password" class="form-label">密码</label>
+                            <input id="password" type="password" class="form-control" placeholder="至少 6 位">
+                        </div>
+
+                        <div id="auth-error" class="alert alert-danger py-2 d-none"></div>
+
+                        <div class="d-grid gap-2">
+                            <button class="btn btn-primary" onclick="submitAuth('login')">登录</button>
+                            <button class="btn btn-outline-secondary" onclick="submitAuth('register')">注册并登录</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/login.js"></script>
+</body>
+</html>
+

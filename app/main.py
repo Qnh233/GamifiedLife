@@ -18,11 +18,11 @@ import uuid
 import json
 import queue
 import threading
-from flask import Flask, request, jsonify, render_template, Response
+from functools import wraps
+from flask import Flask, request, jsonify, render_template, Response, session, redirect, url_for
 from flask_cors import CORS
 from datetime import datetime
-
-from sqlalchemy.orm import Session
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from app.config import config
 from app.database.models import db, User, Goal, Task, UserAchievement, UserReward, GameEvent, Achievement, Reward, ChatLog, init_default_data, ScheduledJob
@@ -57,7 +57,126 @@ def create_app():
 def register_routes(app):
     logger = get_logger(__name__)
 
+    def _json_or_empty():
+        return request.get_json(silent=True) or {}
+
+    def _get_current_user_id(required=True):
+        user_id = session.get('user_id')
+        if required and not user_id:
+            return None
+        return user_id
+
+    def _validate_user_scope(route_user_id=None, payload=None):
+        """校验会话用户与参数用户是否一致，避免跨用户越权。"""
+        session_user_id = _get_current_user_id(required=True)
+        if not session_user_id:
+            return None, (jsonify({'error': 'Unauthorized'}), 401)
+
+        payload = payload or {}
+        body_user_id = payload.get('user_id')
+        for incoming_user_id in [route_user_id, body_user_id]:
+            if incoming_user_id and incoming_user_id != session_user_id:
+                return None, (jsonify({'error': 'Forbidden: cross-user access denied'}), 403)
+        return session_user_id, None
+
+    def login_required(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if not session.get('user_id'):
+                if request.path.startswith('/api/'):
+                    return jsonify({'error': 'Unauthorized'}), 401
+                return redirect(url_for('login_page'))
+            return func(*args, **kwargs)
+        return wrapper
+
+    @app.route('/login')
+    def login_page():
+        if session.get('user_id'):
+            return redirect(url_for('index'))
+        return render_template('login.html')
+
+    @app.route('/api/auth/register', methods=['POST'])
+    def register_user():
+        data = _json_or_empty()
+        username = (data.get('username') or '').strip()
+        password = data.get('password') or ''
+
+        if not username or not password:
+            return jsonify({'error': 'username and password are required'}), 400
+        if len(password) < 6:
+            return jsonify({'error': 'password must be at least 6 characters'}), 400
+        if User.query.filter_by(username=username).first():
+            return jsonify({'error': 'username already exists'}), 409
+
+        user = User(
+            id=str(uuid.uuid4()),
+            username=username,
+            password_hash=generate_password_hash(password),
+            xp_to_next_level=1000,
+            is_active=True,
+            last_login_at=datetime.now()
+        )
+        db.session.add(user)
+        db.session.commit()
+
+        for ach in Achievement.query.all():
+            user_ach = UserAchievement(
+                id=str(uuid.uuid4()),
+                user_id=user.id,
+                achievement_id=ach.id,
+                progress=0,
+                unlocked=False
+            )
+            db.session.add(user_ach)
+        db.session.commit()
+
+        session.clear()
+        session.permanent = True
+        session['user_id'] = user.id
+
+        return jsonify({'success': True, 'user': user.to_dict()})
+
+    @app.route('/api/auth/login', methods=['POST'])
+    def login_user():
+        data = _json_or_empty()
+        username = (data.get('username') or '').strip()
+        password = data.get('password') or ''
+
+        if not username or not password:
+            return jsonify({'error': 'username and password are required'}), 400
+
+        user = User.query.filter_by(username=username).first()
+        if not user or not user.password_hash or not check_password_hash(user.password_hash, password):
+            return jsonify({'error': 'invalid credentials'}), 401
+        if not user.is_active:
+            return jsonify({'error': 'account disabled'}), 403
+
+        user.last_login_at = datetime.now()
+        db.session.commit()
+
+        session.clear()
+        session.permanent = True
+        session['user_id'] = user.id
+        return jsonify({'success': True, 'user': user.to_dict()})
+
+    @app.route('/api/auth/logout', methods=['POST'])
+    @login_required
+    def logout_user():
+        session.clear()
+        return jsonify({'success': True})
+
+    @app.route('/api/auth/me', methods=['GET'])
+    @login_required
+    def auth_me():
+        user_id = _get_current_user_id(required=True)
+        user = User.query.get(user_id)
+        if not user:
+            session.clear()
+            return jsonify({'error': 'User not found'}), 401
+        return jsonify({'authenticated': True, 'user': user.to_dict()})
+
     @app.route('/')
+    @login_required
     def index():
         return render_template('index.html')
 
@@ -75,10 +194,13 @@ def register_routes(app):
         return jsonify({'status': 'healthy'})
     
     @app.route('/api/chat', methods=['POST'])
+    @login_required
     def chat():
         start_ts = time.perf_counter()
-        data = request.get_json()
-        user_id = data.get('user_id')
+        data = _json_or_empty()
+        user_id, error = _validate_user_scope(payload=data)
+        if error:
+            return error
         message = data.get('message')
         log_event(
             logger,
@@ -88,29 +210,13 @@ def register_routes(app):
             preview=True,
         )
         
-        if not user_id or not message:
-            return jsonify({'error': 'user_id and message are required'}), 400
+        if not message:
+            return jsonify({'error': 'message is required'}), 400
         
         user = User.query.get(user_id)
         if not user:
-            user = User(
-                id=user_id,
-                username=f"User_{user_id[:8]}",
-                xp_to_next_level=1000
-            )
-            db.session.add(user)
-            db.session.commit()
-            
-            for ach in Achievement.query.all():
-                user_ach = UserAchievement(
-                    id=str(uuid.uuid4()),
-                    user_id=user_id,
-                    achievement_id=ach.id,
-                    progress=0,
-                    unlocked=False
-                )
-                db.session.add(user_ach)
-            db.session.commit()
+            session.clear()
+            return jsonify({'error': 'User not found'}), 401
         
         # 获取当前上下文
         current_goal = Goal.query.filter_by(user_id=user_id, status='active').first()
@@ -173,10 +279,13 @@ def register_routes(app):
         })
 
     @app.route('/api/chat/stream', methods=['POST'])
+    @login_required
     def chat_stream():
         start_ts = time.perf_counter()
-        data = request.get_json()
-        user_id = data.get('user_id')
+        data = _json_or_empty()
+        user_id, error = _validate_user_scope(payload=data)
+        if error:
+            return error
         message = data.get('message')
         log_event(
             logger,
@@ -185,30 +294,13 @@ def register_routes(app):
             input_preview=message,
             preview=True,
         )
-        if not user_id or not message:
-            return jsonify({'error': 'user_id and message are required'}), 400
+        if not message:
+            return jsonify({'error': 'message is required'}), 400
 
         user = User.query.get(user_id)
         if not user:
-            user = User(
-                id=user_id,
-                username=f"User_{user_id[:8]}",
-                xp_to_next_level=1000
-            )
-            db.session.add(user)
-            db.session.commit()
-            
-            from app.database.models import Achievement, UserAchievement
-            for ach in Achievement.query.all():
-                user_ach = UserAchievement(
-                    id=str(uuid.uuid4()),
-                    user_id=user_id,
-                    achievement_id=ach.id,
-                    progress=0,
-                    unlocked=False
-                )
-                db.session.add(user_ach)
-            db.session.commit()
+            session.clear()
+            return jsonify({'error': 'User not found'}), 401
             
         current_goal = Goal.query.filter_by(user_id=user_id, status='active').first()
         current_tasks = Task.query.filter_by(user_id=user_id, status='pending').all()
@@ -307,12 +399,12 @@ def register_routes(app):
         return Response(generate(), mimetype='text/event-stream')
     
     @app.route('/api/tasks/complete/<task_id>', methods=['POST'])
+    @login_required
     def complete_task(task_id):
-        data = request.get_json()
-        user_id = data.get('user_id')
-        
-        if not user_id:
-            return jsonify({'error': 'user_id is required'}), 400
+        data = _json_or_empty()
+        user_id, error = _validate_user_scope(payload=data)
+        if error:
+            return error
         
         task = Task.query.get(task_id)
         if not task or task.user_id != user_id:
@@ -407,8 +499,11 @@ def register_routes(app):
             'profile': user.to_dict()
         })
     
-    @app.route('/api/profile/<user_id>', methods=['GET'])
-    def get_profile(user_id):
+    @app.route('/api/me/profile', methods=['GET'])
+    @login_required
+    def get_profile():
+        user_id = _get_current_user_id(required=True)
+
         user = User.query.get(user_id)
         if not user:
             return jsonify({
@@ -427,15 +522,19 @@ def register_routes(app):
             'rewards': [r.to_dict() for r in rewards]
         })
     
-    @app.route('/api/goals/<user_id>', methods=['GET'])
-    def get_goals(user_id):
+    @app.route('/api/me/goals', methods=['GET'])
+    @login_required
+    def get_goals():
+        user_id = _get_current_user_id(required=True)
         goals = Goal.query.filter_by(user_id=user_id).all()
         return jsonify({
             'goals': [g.to_dict() for g in goals]
         })
     
-    @app.route('/api/tasks/<user_id>', methods=['GET'])
-    def get_tasks(user_id):
+    @app.route('/api/me/tasks', methods=['GET'])
+    @login_required
+    def get_tasks():
+        user_id = _get_current_user_id(required=True)
         status = request.args.get('status')
         query = Task.query.filter_by(user_id=user_id)
         if status:
@@ -459,8 +558,10 @@ def register_routes(app):
             'rewards': [r.to_dict() for r in rewards]
         })
     
-    @app.route('/api/events/<user_id>', methods=['GET'])
-    def get_events(user_id):
+    @app.route('/api/me/events', methods=['GET'])
+    @login_required
+    def get_events():
+        user_id = _get_current_user_id(required=True)
         limit = request.args.get('limit', 20, type=int)
         events = GameEvent.query.filter_by(user_id=user_id).order_by(
             GameEvent.created_at.desc()
@@ -469,22 +570,27 @@ def register_routes(app):
             'events': [e.to_dict() for e in events]
         })
 
-    @app.route('/api/schedules/<user_id>', methods=['GET'])
-    def get_schedules(user_id):
+    @app.route('/api/me/schedules', methods=['GET'])
+    @login_required
+    def get_schedules():
+        user_id = _get_current_user_id(required=True)
         jobs = ScheduledJob.query.filter_by(user_id=user_id).all()
         return jsonify({
             'schedules': [j.to_dict() for j in jobs]
         })
 
     @app.route('/api/schedules', methods=['POST'])
+    @login_required
     def create_schedule():
-        data = request.get_json()
-        user_id = data.get('user_id')
+        data = _json_or_empty()
+        user_id, error = _validate_user_scope(payload=data)
+        if error:
+            return error
         cron_expression = data.get('cron_expression') # "m h d M w"
         job_type = data.get('job_type') # 'reflector' or 'chat'
         name = data.get('name')
         
-        if not user_id or not cron_expression or not job_type or not name:
+        if not cron_expression or not job_type or not name:
              return jsonify({'error': 'Missing required fields'}), 400
              
         job_id = str(uuid.uuid4())
@@ -510,10 +616,14 @@ def register_routes(app):
         return jsonify({'success': True, 'job': job.to_dict()})
 
     @app.route('/api/schedules/<job_id>', methods=['DELETE'])
+    @login_required
     def delete_schedule(job_id):
+        current_user_id = _get_current_user_id(required=True)
         job = ScheduledJob.query.get(job_id)
         if not job:
             return jsonify({'error': 'Job not found'}), 404
+        if job.user_id != current_user_id:
+            return jsonify({'error': 'Forbidden: cross-user access denied'}), 403
             
         db.session.delete(job)
         db.session.commit()
