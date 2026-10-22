@@ -69,8 +69,22 @@ async def chat_node(state: AgentState) -> AgentState:
         preview=True
     )
 
-    # Use llm (without tools) to prevent chat agent from generating unhandled tool calls
-    response = await llm_client.llm_with_tools.ainvoke(messages)
+    try:
+        response = await llm_client.invoke_with_retry(messages, prefer_tools=True)
+    except Exception as e:
+        log_event(
+            logger,
+            "agent.chat.llm.failed",
+            user_id=state.get("user_id"),
+            level="error",
+            error=str(e),
+        )
+        fallback_text = "我现在状态有点不稳定，但我还在。先告诉我你最紧急的一件事，我会用最简模式帮你拆一步。"
+        return {
+            "messages": [AIMessage(content=fallback_text)],
+            "workflow_status": "chat_fallback_response",
+            "final_response": fallback_text,
+        }
 
     log_event(
         logger,

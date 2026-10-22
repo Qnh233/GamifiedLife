@@ -28,15 +28,7 @@ Keep responses concise but informative.
 
 async def query_node(state: AgentState, config: RunnableConfig) -> AgentState:
     user_input = state["user_input"]
-    profile = state.get("user_profile")
-    tasks = state.get("current_tasks", [])
-    goal = state.get("current_goal")
     current_user_id = config["configurable"]["user_id"]
-
-    if profile:
-        profile_dict = profile if isinstance(profile, dict) else profile.to_dict() if hasattr(profile, 'to_dict') else {}
-    else:
-        profile_dict = {}
     
     context = f"""
 User Query: {user_input}
@@ -74,7 +66,19 @@ User Query: {user_input}
     # 3. 异步调用绑定了工具的 LLM
     # 如果 LLM 觉得不需要工具，它返回纯文本的 AIMessage
     # 如果 LLM 觉得需要工具，它返回带有 tool_calls 属性的 AIMessage
-    response = await llm_client.llm_with_tools.ainvoke(messages,config={'configurable':{'user_id':current_user_id}})
+    try:
+        response = await llm_client.invoke_with_retry(
+            messages,
+            prefer_tools=True,
+            invoke_config={'configurable': {'user_id': current_user_id}},
+        )
+    except Exception:
+        fallback = "我暂时无法查询到完整状态，请稍后重试。你也可以先问我一个简短问题。"
+        return {
+            "messages": [],
+            "workflow_status": "query_fallback_response",
+            "final_response": fallback
+        }
     # 4. 严格按照 Reducer 规则返回增量数据
     return {
         "messages": [response],

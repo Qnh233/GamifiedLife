@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from datetime import datetime
 from flask_apscheduler import APScheduler
 from app.database.models import db, ScheduledJob, User, Goal, Task, ChatLog
@@ -8,6 +9,7 @@ from app.agents.reflector import run_reflector
 from app.agents.workflow import run_agent_workflow
 import time
 from app.utils.logging_utils import get_logger, log_event, preview_text
+from app.config import config
 logger = get_logger(__name__)
 
 scheduler = APScheduler()
@@ -70,7 +72,7 @@ def execute_job(job_id):
     We need app context to access DB.
     """
     with scheduler.app.app_context():
-        job = ScheduledJob.query.get(job_id)
+        job = db.session.get(ScheduledJob, job_id)
         if not job or not job.is_active:
             return
 
@@ -78,22 +80,25 @@ def execute_job(job_id):
         
         try:
             if job.job_type == 'reflector':
-                asyncio.run(run_reflector(job.user_id))
+                asyncio.run(asyncio.wait_for(run_reflector(job.user_id), timeout=config.AGENT_WORKFLOW_TIMEOUT_SEC))
             elif job.job_type == 'chat':
                 if job.message_content:
-                    asyncio.run(trigger_chat_workflow(job.user_id, job.message_content))
+                    asyncio.run(asyncio.wait_for(trigger_chat_workflow(job.user_id, job.message_content), timeout=config.AGENT_WORKFLOW_TIMEOUT_SEC))
             
             # Update last run time
             job.last_run_at = datetime.now() 
             db.session.commit()
             
+        except asyncio.TimeoutError:
+            log_event(logger, "scheduler.job.execution_timeout", level="error", job_id=job_id)
+            db.session.rollback()
         except Exception as e:
             log_event(logger, "scheduler.job.execution_failed", level="error", job_id=job_id, error=str(e))
             db.session.rollback()
 
 async def trigger_chat_workflow(user_id, message):
     # Logic similar to /api/chat
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id)
     if not user:
         return
         
@@ -105,9 +110,17 @@ async def trigger_chat_workflow(user_id, message):
     
     # Log as system message or pseudo-user message? 
     # If it's a "morning report", it's like the user said "Give me a morning report".
-    user_msg = ChatLog(user_id=user_id, role='user', content=f"[Scheduled Task] {message}")
+    user_msg = ChatLog(id=str(uuid.uuid4()),user_id=user_id, role='user', content=f"[Scheduled Task] {message}")
     db.session.add(user_msg)
     db.session.commit()
 
-    result = await run_agent_workflow(user_id, message, user.to_dict(), goal_dict, tasks_list)
+    # 定时任务使用独立会话标识，避免覆盖用户在前台会话中的 checkpoint。
+    result = await run_agent_workflow(
+        user_id,
+        message,
+        user.to_dict(),
+        goal_dict,
+        tasks_list,
+        session_id="scheduled_task",
+    )
     save_agent_result(user_id, result)

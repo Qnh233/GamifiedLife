@@ -298,6 +298,51 @@ GamifiedLife/
 2. 实现 Agent Node 函数
 3. 在 `workflow.py` 中注册到 LangGraph
 
+## 生产部署：HTTPS + Let's Encrypt 自动证书
+
+生产编排文件使用 `docker-compose.prod.yml`，通过 `nginx + certbot` 自动申请/续期证书。
+
+### 1) 准备环境变量
+
+在 `.prod.env` 配置以下字段：
+
+- `LE_CERTBOT_ENABLED`: `0` 无域名模式（禁用自动申请），`1` 开启自动申请
+- `LE_DOMAIN`: 主域名（必须已解析到服务器公网 IP）
+- `LE_ADDITIONAL_DOMAINS`: 附加域名（逗号分隔，可留空）
+- `LE_EMAIL`: 证书提醒邮箱
+- `LE_STAGING`: `1` 测试环境，`0` 正式环境
+
+如果你暂时没有域名，建议设置 `LE_CERTBOT_ENABLED=0`，系统会保留 HTTPS（自签证书）并跳过 Let's Encrypt 申请。
+
+### 2) 首次启动前准备临时证书（避免 Nginx 启动失败）
+
+```bash
+openssl req -x509 -nodes -days 3 -newkey rsa:2048 \
+  -keyout deploy/certs/privkey.pem \
+  -out deploy/certs/fullchain.pem \
+  -subj "/CN=localhost"
+```
+
+### 3) 启动生产栈
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .prod.env up -d --build
+```
+
+### 4) 切换正式签发
+
+确认流程正常后，把 `LE_CERTBOT_ENABLED=1` 且 `LE_STAGING=0`，然后重建 `certbot`：
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .prod.env up -d --force-recreate certbot
+```
+
+### 5) 验证
+
+- 访问 `http://<你的域名>/.well-known/acme-challenge/test` 不应被强制跳转到 HTTPS
+- 访问 `https://<你的域名>/health` 返回健康状态
+- 打开 `https://<你的域名>` 查看证书签发机构是否为 Let's Encrypt
+
 # 计划
 - [ ] 设计用户属性经验条
 - [x] agent链路流输出

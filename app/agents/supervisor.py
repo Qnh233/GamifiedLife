@@ -8,13 +8,10 @@ the user input to the Planner (for new goals) or to the Reward Agent
 import json
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.runnables import RunnableConfig
-
 from app.agents.state import AgentState
 from app.agents.llm_client import llm_client
+from app.evals.core_logic import safe_json_loads
 
-from app.common.POJO.supervisor_Decision import Decision
 from app.utils.logging_utils import get_logger, log_event, preview_text
 logger = get_logger(__name__)
 
@@ -48,10 +45,6 @@ Example output:
 
 async def supervisor_node(state: AgentState) -> AgentState:
     user_input = state["user_input"]
-    # 1. 实例化解析器，绑定你的 Pydantic 模型
-    parser = JsonOutputParser(pydantic_object=Decision)
-    # format_instructions = parser.get_format_instructions()
-
     # Ensure we don't duplicate the raw input if it's already in state history
     messages_for_prompt = state["messages"]
     if messages_for_prompt and isinstance(messages_for_prompt[-1], HumanMessage) and messages_for_prompt[-1].content == user_input:
@@ -63,16 +56,31 @@ async def supervisor_node(state: AgentState) -> AgentState:
     # Use JSON mode to avoid provider-specific tool_choice incompatibilities.
     # structured_llm = llm_client.llm(Decision, method="json_mode")
 
-    response = await llm_client.llm.ainvoke(message)
+    try:
+        response = await llm_client.invoke_with_retry(message, prefer_tools=False)
+    except Exception as e:
+        log_event(logger, "agent.supervisor.llm_failed", level="error", error=str(e))
+        response_data = {
+            "decision": "CHAT",
+            "reasoning": "LLM unavailable, fallback to CHAT.",
+            "confidence": 0.0
+        }
+        return {
+            "supervisor_decision": response_data,
+            "next_agent": "CHAT",
+            "workflow_status": "routed_to_chat_fallback",
+            "messages": [AIMessage(
+                role="assistant",
+                agent="supervisor",
+                content="Fallback routing: supervisor degraded to CHAT."
+            )]
+        }
     # response_data = response.model_dump() if hasattr(response, "model_dump") else response
     # 2. 解析 LLM 输出
     content = response.content.strip()
     # 3. 解析 JSON
-    try:
-        response_data = json.loads(content)
-        # 如果你后续严格需要 Pydantic 对象，可以取消下面这行的注释:
-        # response_data = Decision(**response_data).model_dump()
-    except json.JSONDecodeError:
+    response_data = safe_json_loads(content, {})
+    if not response_data:
         log_event(logger, "agent.supervisor.parse_error", level="error", content_preview=preview_text(content))
         # 容错处理：如果解析失败，默认走常规聊天
         response_data = {

@@ -14,7 +14,7 @@ from app.config import config
 from datetime import datetime
 import uuid
 
-from app.utils.logging_utils import log_event, get_logger
+from app.utils.logging_utils import log_event, get_logger, preview_text
 
 logger = get_logger(__name__)
 PLANNER_SYSTEM_PROMPT = """You are the Planner Agent for the Gamified Life Engine.
@@ -93,7 +93,31 @@ User Profile Context:
     message = [SystemMessage(content=PLANNER_SYSTEM_PROMPT)] + messages_for_prompt + [HumanMessage(content=f"{user_input}\n{context}")]
 
     # Use JSON mode to avoid provider-specific tool_choice incompatibilities.
-    response = await llm_client.llm.ainvoke(message)
+    try:
+        response = await llm_client.invoke_with_retry(message, prefer_tools=False)
+    except Exception as e:
+        log_event(logger, "agent.planner.llm_failed", level="error", error=str(e), user_id=state.get("user_id"))
+        response_data = {
+            "goal": {
+                "id": str(uuid.uuid4()),
+                "title": "Fallback Goal",
+                "description": "Planner degraded: waiting for user retry.",
+                "deadline": None,
+                "xp_reward": 0
+            },
+            "tasks": []
+        }
+        goal = response_data["goal"]
+        response_msg = "我暂时无法生成详细计划，已创建空计划骨架。你可以稍后重试。"
+        return {
+            "current_goal": goal,
+            "current_tasks": [],
+            "planner_output": response_data,
+            "final_response": response_msg,
+            "workflow_status": "planning_fallback_empty_plan",
+            "next_agent": "RESPONSE",
+            "messages": [AIMessage(content=response_msg, name="planner")]
+        }
 
     # 2. 解析 LLM 输出
     content = response.content.strip()

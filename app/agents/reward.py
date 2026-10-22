@@ -8,15 +8,16 @@ This agent handles:
 4. Generating immersive reward messages
 5. Checking and unlocking achievements
 """
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, AIMessage
+import json
 
 from app.agents.state import AgentState
 from app.agents.llm_client import llm_client
 from app.config import config
 from datetime import datetime
 import uuid
-import random
 from app.utils.logging_utils import get_logger, log_event
+from app.evals.core_logic import apply_xp_to_profile, calculate_drop, calculate_xp_reward, safe_json_loads
 logger = get_logger(__name__)
 
 
@@ -63,50 +64,6 @@ REWARD_POOL = [
     {"name": "Golden Ticket", "rarity": "legendary", "type": "item", "value": 1, "description": "Auto-complete any task"},
 ]
 
-
-def calculate_drop(task_dict: dict, profile_dict: dict) -> dict | None:
-    base_drop_rate = config.DROP_RATE_BASE
-    
-    if task_dict.get("difficulty") == "hard":
-        base_drop_rate += 0.05
-    elif task_dict.get("difficulty") == "epic":
-        base_drop_rate += 0.15
-    
-    if task_dict.get("is_challenge"):
-        base_drop_rate += 0.10
-    
-    base_drop_rate += profile_dict.get("streak_days", 0) * 0.02
-    
-    if random.random() > base_drop_rate:
-        return None
-    
-    roll = random.random()
-    if roll < 0.60:
-        rarity = "common"
-    elif roll < 0.85:
-        rarity = "rare"
-    elif roll < 0.97:
-        rarity = "epic"
-    else:
-        rarity = "legendary"
-    
-    available = [r for r in REWARD_POOL if r["rarity"] == rarity]
-    if not available:
-        available = REWARD_POOL
-    
-    chosen = random.choice(available)
-    
-    return {
-        "id": str(uuid.uuid4()),
-        "name": chosen["name"],
-        "description": chosen["description"],
-        "reward_type": chosen["type"],
-        "value": chosen["value"],
-        "rarity": rarity,
-        "obtained_at": datetime.now().isoformat()
-    }
-
-
 TASK_MATCH_PROMPT = """You are helping the Reward Agent identify which task the user completed.
 
 User Input: "{user_input}"
@@ -135,6 +92,7 @@ async def reward_node(state: AgentState) -> AgentState:
     profile_dict = profile if isinstance(profile, dict) else profile.to_dict() if hasattr(profile, 'to_dict') else {"level": 1}
     
     completed_task = None
+    xp_only_mode = False
 
     # 1. Check if any task is already marked completed in state (unlikely if coming from pending DB list)
     for task in tasks:
@@ -142,21 +100,18 @@ async def reward_node(state: AgentState) -> AgentState:
             completed_task = task
             break
     
-    # Ensure we don't duplicate the raw input
-    messages_for_prompt = state["messages"]
-    if messages_for_prompt and isinstance(messages_for_prompt[-1], HumanMessage) and messages_for_prompt[-1].content == user_input:
-        messages_for_prompt = messages_for_prompt[:-1]
-
-    message = [SystemMessage(content=REWARD_SYSTEM_PROMPT)] + messages_for_prompt + [HumanMessage(content=user_input)]
-
     # 2. If no task identified, use LLM to match user input to a task
     if not completed_task and tasks:
         task_list_str = "\n".join([f"- ID: {t['id']}, Title: {t['title']}" for t in tasks if isinstance(t, dict)])
 
         try:
-            match_response = await llm_client.llm_with_tools.ainvoke(message)
-
-            task_id = match_response.content.get("task_id") if match_response.content.get("task_id") else None
+            match_prompt = TASK_MATCH_PROMPT.format(user_input=user_input, task_list=task_list_str)
+            match_response = await llm_client.invoke_with_retry(
+                [SystemMessage(content=match_prompt)],
+                prefer_tools=False,
+            )
+            parsed = safe_json_loads(match_response.content, {"task_id": None, "confidence": 0.0, "reasoning": ""})
+            task_id = parsed.get("task_id")
             if task_id:
                 for t in tasks:
                     if t.get("id") == task_id:
@@ -171,6 +126,12 @@ async def reward_node(state: AgentState) -> AgentState:
             if len(tasks) == 1 and len(user_input) < 20:
                 completed_task = tasks[0]
                 completed_task['status'] = 'completed'
+            elif tasks:
+                # Layer 3: 奖励节点兜底，最小化处理为“仅XP”
+                completed_task = tasks[0]
+                completed_task['status'] = 'completed'
+                completed_task['completed_at'] = datetime.now().isoformat()
+                xp_only_mode = True
 
     if not completed_task:
         # If still no task identified, ask user to be more specific
@@ -183,31 +144,16 @@ async def reward_node(state: AgentState) -> AgentState:
             "next_agent": "RESPONSE"
         }
 
-    base_xp = config.BASE_XP_PER_TASK
-    difficulty_mult = config.DIFFICULTY_MULTIPLIER.get(
-        completed_task.get("difficulty") if completed_task else "medium", 1.0
+    # 奖励节点与 HTTP 完成任务接口复用同一 XP 规则，避免评估时出现双标准。
+    xp_earned = calculate_xp_reward(
+        completed_task.get("difficulty") if completed_task else "medium",
+        bool(completed_task and completed_task.get("is_challenge")),
     )
-    xp_earned = int(base_xp * difficulty_mult)
-    
-    if completed_task and completed_task.get("is_challenge"):
-        xp_earned = int(xp_earned * 1.5)
-    
-    old_level = profile_dict.get("level", 1)
-    profile_dict["current_xp"] = profile_dict.get("current_xp", 0) + xp_earned
-    profile_dict["total_xp"] = profile_dict.get("total_xp", 0) + xp_earned
-    
-    xp_to_next = profile_dict.get("xp_to_next_level", 1000)
-    while profile_dict["current_xp"] >= xp_to_next:
-        profile_dict["current_xp"] -= xp_to_next
-        profile_dict["level"] = profile_dict.get("level", 1) + 1
-        xp_to_next = int(xp_to_next * 1.2)
-    profile_dict["xp_to_next_level"] = xp_to_next
-    
-    level_up = profile_dict.get("level", 1) > old_level
+    profile_dict, level_up = apply_xp_to_profile(profile_dict, xp_earned)
     
     drop = None
-    if completed_task:
-        drop = calculate_drop(completed_task, profile_dict)
+    if completed_task and not xp_only_mode:
+        drop = calculate_drop(completed_task, profile_dict, REWARD_POOL)
     
     if completed_task:
         profile_dict["tasks_completed"] = profile_dict.get("tasks_completed", 0) + 1
@@ -232,7 +178,7 @@ async def reward_node(state: AgentState) -> AgentState:
         "rewards_earned": [drop] if drop else [],
         "game_events": state.get("game_events", []) + [game_event],
         "messages": [AIMessage(agent="reward", content=reward_message)],
-        "workflow_status": "reward_processed",
+        "workflow_status": "reward_degraded_xp_only" if xp_only_mode else "reward_processed",
         "next_agent": "RESPONSE",
         "final_response": reward_message
     }

@@ -5,6 +5,9 @@ This module defines the LangGraph workflow that orchestrates
 all agents together using state machine patterns.
 """
 import time
+import asyncio
+import importlib
+from typing import Optional
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
@@ -17,23 +20,46 @@ from app.agents.planner import planner_node
 from app.agents.reward import reward_node
 from app.agents.query import query_node
 from app.agents.chat import chat_node
-from app.agents.tools import tools_node
 from app.agents.reflector import reflector_node
 from langgraph.graph.state import CompiledStateGraph
 from app.mcp.mcp_tools import agent_tools
+from app.config import config as app_config
+from app.utils.logging_utils import get_logger
 
-import logging
-from app.utils.logging_utils import get_logger, log_event
 # app/agents/workflow.py 顶部
 from openinference.instrumentation.langchain import LangChainInstrumentor
 
 # 一键对 LangChain/LangGraph 组件插桩
 LangChainInstrumentor().instrument()
+logger = get_logger(__name__)
 
 def create_workflow() -> CompiledStateGraph:
-
-    logger = get_logger(__name__)
-    memory_saver = MemorySaver()
+    # 优先使用 Redis 持久化 checkpoint；若 Redis/依赖不可用则降级到内存模式。
+    checkpointer = MemorySaver()
+    # try:
+    #     redis_module = importlib.import_module("langgraph.checkpoint.redis")
+    #     redis_checkpoint_saver_cls = getattr(redis_module, "RedisSaver", None)
+    #     if redis_checkpoint_saver_cls is None:
+    #         raise ImportError("RedisSaver not found in langgraph.checkpoint.redis")
+    #     redis_saver = redis_checkpoint_saver_cls(
+    #             redis_url=app_config.REDIS_URL,
+    #             # 关键保护：为 checkpoint Redis 请求设置超时，防止对话链路被无限阻塞。
+    #             connection_args={
+    #                 "socket_connect_timeout": app_config.REDIS_SOCKET_CONNECT_TIMEOUT_SEC,
+    #                 "socket_timeout": app_config.REDIS_SOCKET_TIMEOUT_SEC,
+    #                 "retry_on_timeout": True,
+    #             },
+    #             checkpoint_prefix="workflow_checkpoint",
+    #             checkpoint_write_prefix="workflow_checkpoint_write",
+    #     )
+    #     redis_saver.setup()
+    #     checkpointer = redis_saver
+    #     logger.info("LangGraph checkpointer initialized with Redis.")
+    # except Exception as exc:
+    #     logger.warning(
+    #         "Redis checkpointer unavailable (requires Redis Stack with RediSearch, e.g. FT._LIST support), fallback to MemorySaver: %s",
+    #         exc,
+    #     )
     workflow = StateGraph(AgentState)
     # 监督节点
     workflow.add_node("supervisor", supervisor_node)
@@ -61,6 +87,8 @@ def create_workflow() -> CompiledStateGraph:
             return "chat"
         elif next_agent == "PLANNING":
             return "planner"  # 默认直接生成响应
+        else:
+            return "response"
     workflow.set_entry_point("supervisor")
     workflow.add_conditional_edges(
         "supervisor",
@@ -108,27 +136,52 @@ def create_workflow() -> CompiledStateGraph:
     # workflow.add_edge("response", "reflector")
     workflow.add_edge("response", END)
     
-    return workflow.compile(checkpointer=memory_saver)
+    return workflow.compile(checkpointer=checkpointer)
 
 
 workflow = create_workflow()
 
 
-async def run_agent_workflow(user_id: str, user_input: str, user_profile=None, current_goal=None, current_tasks=None) -> AgentState:
+def _build_thread_id(user_id: str, session_id: Optional[str]) -> str:
+    # 多会话隔离：同一用户在不同会话下使用独立 thread_id，避免 checkpoint 覆盖。
+    safe_session_id = (session_id or "").strip() or "default"
+    return f"{user_id}:{safe_session_id}"
+
+
+async def run_agent_workflow(
+    user_id: str,
+    user_input: str,
+    user_profile=None,
+    current_goal=None,
+    current_tasks=None,
+    session_id: Optional[str] = None,
+) -> AgentState:
     initial_state = create_initial_state(user_id, user_input, current_goal, current_tasks)
     if user_profile:
         initial_state["user_profile"] = user_profile
-    config = RunnableConfig(configurable={'user_id':user_id,
-                                          'thread_id': f"{user_id}"})
-    final_state = await workflow.ainvoke(initial_state, config=config)
+    config = RunnableConfig(
+        configurable={"user_id": user_id, "thread_id": _build_thread_id(user_id, session_id)}
+    )
+    final_state = await asyncio.wait_for(
+        workflow.ainvoke(initial_state, config=config),
+        timeout=app_config.AGENT_WORKFLOW_TIMEOUT_SEC,
+    )
     return final_state
 
-async def stream_agent_workflow(user_id: str, user_input: str, user_profile=None, current_goal=None, current_tasks=None):
+async def stream_agent_workflow(
+    user_id: str,
+    user_input: str,
+    user_profile=None,
+    current_goal=None,
+    current_tasks=None,
+    session_id: Optional[str] = None,
+):
     initial_state = create_initial_state(user_id, user_input, current_goal, current_tasks)
     if user_profile:
         initial_state["user_profile"] = user_profile
-    config = RunnableConfig(configurable={'user_id': user_id,
-                                          'thread_id': f"{user_id}"})
+    config = RunnableConfig(
+        configurable={"user_id": user_id, "thread_id": _build_thread_id(user_id, session_id)}
+    )
     async for event in workflow.astream(initial_state, stream_mode="updates", config=config):
         yield event
 

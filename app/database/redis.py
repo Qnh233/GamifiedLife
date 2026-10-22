@@ -4,7 +4,7 @@ Redis service for session state and caching
 import redis.asyncio as redis
 import json
 from typing import Optional, Any
-from app.config import settings
+from app.config import config
 from app.schemas import UserProfile
 
 
@@ -14,7 +14,7 @@ class RedisService:
     
     async def connect(self):
         self.client = redis.from_url(
-            settings.redis_url,
+            config.redis_url,
             encoding="utf-8",
             decode_responses=True
         )

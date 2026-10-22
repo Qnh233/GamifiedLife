@@ -82,14 +82,18 @@ async def run_reflector(user_id):
         HumanMessage(content=f"CURRENT PERSONA:\n{current_persona}\n\nRECENT HISTORY:\n{history_text}")
     ]
     
-    response = await llm_client.llm.ainvoke(messages)
-    new_persona = response.content
+    try:
+        response = await llm_client.invoke_with_retry(messages, prefer_tools=False)
+        new_persona = response.content
+    except Exception as e:
+        log_event(logger, "agent.reflector.llm_failed", level="error", user_id=user_id, error=str(e))
+        return "Reflector skipped due to LLM degradation."
 
     # 4. Save
     save_persona_content(user_id, new_persona)
     
     # 5. Update user's specific last_reflection_at
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id)
     if user:
         user.last_reflection_at = datetime.now()
         db.session.commit()

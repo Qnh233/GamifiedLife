@@ -34,6 +34,8 @@ async def get_user_gaming_status(
         if not user_id:
             return "错误: 无法确定当前用户身份 (Context missing user_id)。请联系管理员检查系统配置。"
         try:
+            if not await mcp_client.is_available():
+                return "MCP 服务暂不可用，已跳过外部工具查询。"
             # 这里直接调用你现有的 MCP 客户端逻辑
             result = await mcp_client.call_tool("get_user_gaming_status", user_id=user_id)
             span.set_attribute("getuser_result", result)

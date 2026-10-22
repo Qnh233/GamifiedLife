@@ -1,28 +1,22 @@
 import uuid
 from datetime import datetime
+import time
 from app.database.models import db, User, Goal, Task, UserAchievement, UserReward, GameEvent, ChatLog
+from app.config import config
 
-def save_agent_result(user_id, result):
-    """
-    Persists the result state from the agent workflow into the database.
-    """
-    user = User.query.get(user_id)
+def _save_agent_result_once(user_id, result):
+    user = db.session.get(User, user_id)
     if not user:
-        return
+        return True
 
-    # Save Assistant Response
     if result.get('final_response'):
         ai_msg = ChatLog(id=str(uuid.uuid4()),user_id=user_id, role='assistant', content=result['final_response'])
         db.session.add(ai_msg)
-        # We can commit incrementally or at the end. 
-        # For safety, let's just add to session and commit at end unless needed earlier.
 
     if result.get('current_goal'):
-        # current_goal is a dict
         goal_data = result['current_goal']
-        existing_goal = Goal.query.get(goal_data['id'])
+        existing_goal = db.session.get(Goal, goal_data['id'])
         if not existing_goal:
-            # Check if we need to convert dates
             deadline = None
             if goal_data.get('deadline'):
                 try:
@@ -41,7 +35,6 @@ def save_agent_result(user_id, result):
             )
             db.session.add(goal)
         else:
-            # Update existing goal
             if goal_data.get('status'):
                  existing_goal.status = goal_data['status']
             if goal_data.get('completed_at'):
@@ -52,9 +45,8 @@ def save_agent_result(user_id, result):
     
     if result.get('current_tasks'):
         for task_data in result['current_tasks']:
-            existing_task = Task.query.get(task_data['id'])
+            existing_task = db.session.get(Task, task_data['id'])
             if not existing_task:
-                # Create new task
                 due_date = None
                 if task_data.get('due_date'):
                     try:
@@ -85,7 +77,6 @@ def save_agent_result(user_id, result):
                 )
                 db.session.add(task)
             else:
-                # Update existing task status if changed
                 if task_data.get('status') and task_data['status'] != existing_task.status:
                     existing_task.status = task_data['status']
                 
@@ -100,7 +91,6 @@ def save_agent_result(user_id, result):
 
     if result.get('user_profile'):
         user_data = result['user_profile']
-        # Only update if key exists to avoid overwriting with None if partial update
         if 'level' in user_data: user.level = user_data.get('level', user.level)
         if 'total_xp' in user_data: user.total_xp = user_data.get('total_xp', user.total_xp)
         if 'current_xp' in user_data: user.current_xp = user_data.get('current_xp', user.current_xp)
@@ -113,8 +103,6 @@ def save_agent_result(user_id, result):
     if result.get('rewards_earned'):
         for reward_data in result['rewards_earned']:
             if reward_data:
-                # reward_data might be full object or just partial. 
-                # Assuming reward_id is 'id' in reward_data
                 user_reward = UserReward(
                     id=str(uuid.uuid4()),
                     user_id=user_id,
@@ -133,7 +121,6 @@ def save_agent_result(user_id, result):
             )
             db.session.add(event)
         
-        # Check unlocked achievements from events
         for event in result['game_events']:
             if event.get('achievements_unlocked'):
                 for ach in event['achievements_unlocked']:
@@ -146,4 +133,24 @@ def save_agent_result(user_id, result):
                         user_ach.unlocked_at = datetime.now()
     
     db.session.commit()
+    return True
+
+def save_agent_result(user_id, result):
+    """
+    Persists the result state from the agent workflow into the database.
+    Adds rollback + retry for transient DB failures.
+    """
+    last_error = None
+    max_retries = max(1, config.DB_MAX_RETRIES)
+    for attempt in range(max_retries):
+        try:
+            return _save_agent_result_once(user_id, result)
+        except Exception as e:
+            last_error = e
+            db.session.rollback()
+            if attempt == max_retries - 1:
+                raise
+            delay = config.DB_RETRY_BASE_DELAY_SEC * (2 ** attempt)
+            time.sleep(delay)
+    raise RuntimeError(f"save_agent_result failed after retries: {last_error}")
 

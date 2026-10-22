@@ -188,7 +188,7 @@ class UserAchievement(Base):
     unlocked_at = db.Column(db.DateTime)
     
     def to_dict(self):
-        achievement = Achievement.query.get(self.achievement_id)
+        achievement = db.session.get(Achievement, self.achievement_id)
         return {
             'id': self.id,
             'achievement_id': self.achievement_id,
@@ -236,7 +236,7 @@ class UserReward(Base):
     obtained_at = db.Column(db.DateTime, default=datetime.now)
     
     def to_dict(self):
-        reward = Reward.query.get(self.reward_id)
+        reward = db.session.get(Reward, self.reward_id)
         return {
             'id': self.id,
             'reward_id': self.reward_id,
@@ -295,12 +295,12 @@ DEFAULT_REWARDS = [
 
 def init_default_data():
     for ach_data in DEFAULT_ACHIEVEMENTS:
-        if not Achievement.query.get(ach_data['id']):
+        if not db.session.get(Achievement, ach_data['id']):
             achievement = Achievement(**ach_data)
             db.session.add(achievement)
     
     for reward_data in DEFAULT_REWARDS:
-        if not Reward.query.get(reward_data['id']):
+        if not db.session.get(Reward, reward_data['id']):
             reward = Reward(**reward_data)
             db.session.add(reward)
     

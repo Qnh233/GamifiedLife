@@ -11,3 +11,7 @@ Dockerfile
 /migrations
 docker-compose.prod.yml
 docker-compose.yml
+/tests
+/evals
+/.cursor
+CHANGELOG.md

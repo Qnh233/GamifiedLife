@@ -188,49 +188,79 @@ async function sendMessage() {
     box.appendChild(msg);
     box.scrollTop = box.scrollHeight;
 
-    try {
+    const streamId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `stream_${Date.now()}`;
+    let lastEventId = '';
+    let isDone = false;
+
+    async function consumeStream(attempt = 0) {
+        const headers = {'Content-Type': 'application/json'};
+        if (lastEventId) {
+            headers['Last-Event-ID'] = String(lastEventId);
+        }
         const res = await apiFetch('/api/chat/stream', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ message: message })
+            headers,
+            body: JSON.stringify({ message: message, stream_id: streamId })
         });
 
         const reader = res.body.getReader();
         const decoder = new TextDecoder("utf-8");
+        let buffer = '';
 
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n\n');
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const dataStr = line.replace('data: ', '');
-                    if (!dataStr) continue;
-                    try {
-                        const data = JSON.parse(dataStr);
-                        if (data.error) {
-                            contentDiv.innerHTML += `<br/><span style="color:red">${data.error}</span>`;
-                        } else if (data.type === 'update') {
-                            for (const [node, eventStr] of Object.entries(data.data)) {
-                                thoughtsDiv.innerHTML += `<div><span style="color:#007bff">[${node}]</span> ${eventStr}</div>`;
-                            }
-                            box.scrollTop = box.scrollHeight;
-                        } else if (data.type === 'done') {
-                            if (typeof marked !== 'undefined') {
-                                contentDiv.innerHTML = marked.parse(data.final_response || "Action processed.");
-                            } else {
-                                contentDiv.textContent = data.final_response || "Action processed.";
-                            }
-                            box.scrollTop = box.scrollHeight;
-                            loadData(); // Refresh UI after completion
-                        }
-                    } catch (e) {
-                        console.error("Error parsing SSE data", e, dataStr);
+            buffer += decoder.decode(value, { stream: true });
+            const frames = buffer.split('\n\n');
+            buffer = frames.pop() || '';
+
+            for (const frame of frames) {
+                if (!frame.trim()) continue;
+                const rows = frame.split('\n');
+                let payload = '';
+                for (const row of rows) {
+                    if (row.startsWith('id:')) {
+                        lastEventId = row.slice(3).trim();
+                    } else if (row.startsWith('data:')) {
+                        payload += row.slice(5).trim();
                     }
+                }
+                if (!payload) continue;
+                try {
+                    const data = JSON.parse(payload);
+                    if (data.error) {
+                        contentDiv.innerHTML += `<br/><span style="color:red">${data.error}</span>`;
+                    } else if (data.type === 'update') {
+                        for (const [node, eventStr] of Object.entries(data.data)) {
+                            thoughtsDiv.innerHTML += `<div><span style="color:#007bff">[${node}]</span> ${eventStr}</div>`;
+                        }
+                        box.scrollTop = box.scrollHeight;
+                    } else if (data.type === 'done') {
+                        isDone = true;
+                        if (typeof marked !== 'undefined') {
+                            contentDiv.innerHTML = marked.parse(data.final_response || "Action processed.");
+                        } else {
+                            contentDiv.textContent = data.final_response || "Action processed.";
+                        }
+                        box.scrollTop = box.scrollHeight;
+                        loadData();
+                    }
+                } catch (e) {
+                    console.error("Error parsing SSE frame", e, payload);
                 }
             }
         }
+
+        if (!isDone && attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+            await consumeStream(attempt + 1);
+        }
+    }
+
+    try {
+        await consumeStream(0);
     } catch (e) {
         console.error("Chat error", e);
         contentDiv.innerHTML = "Error: " + e.message;

@@ -2,22 +2,29 @@
 Flask application for Gamified Life Engine
 """
 # app/main.py
+import os
+import asyncio
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-# 1. 设置全局 Tracer
-resource = Resource(attributes={SERVICE_NAME: "gamified-life-engine"})
+# 1. 设置全局 Tracer（通过环境变量适配容器与本地）
+otel_service_name = os.environ.get("OTEL_SERVICE_NAME", "gamified-life-engine")
+otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4317")
+otel_insecure = os.environ.get("OTEL_EXPORTER_OTLP_INSECURE", "true").lower() == "true"
+
+resource = Resource(attributes={SERVICE_NAME: otel_service_name})
 provider = TracerProvider(resource=resource)
-processor = BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317",insecure=True))
+processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=otel_endpoint, insecure=otel_insecure))
 provider.add_span_processor(processor)
 trace.set_tracer_provider(provider)
 import uuid
 import json
-import queue
 import threading
+from dataclasses import dataclass, field
 from functools import wraps
 from flask import Flask, request, jsonify, render_template, Response, session, redirect, url_for
 from flask_cors import CORS
@@ -29,12 +36,37 @@ from app.database.models import db, User, Goal, Task, UserAchievement, UserRewar
 from app.agents.workflow import run_agent_workflow
 from app.scheduler_service import init_scheduler, add_job_to_scheduler, remove_job_from_scheduler
 from app.database.services import save_agent_result
+from app.evals.core_logic import apply_xp_to_profile, calculate_drop_rate, calculate_xp_reward, roll_drop_rarity
 from app.utils.logging_utils import get_logger, setup_logging, log_event
+from app.mcp.client import mcp_client
 import time
+
+@dataclass
+class StreamSession:
+    events: list = field(default_factory=list)
+    done: bool = False
+    event_seq: int = 0
+    created_at: float = field(default_factory=time.time)
+    condition: threading.Condition = field(default_factory=threading.Condition)
+    final_state: dict | None = None
+
+STREAM_SESSIONS: dict[str, StreamSession] = {}
+STREAM_SESSIONS_LOCK = threading.Lock()
+STREAM_SESSION_TTL_SEC = 600
+USER_NOT_FOUND_ERROR = 'User not found'
 
 def create_app():
     app = Flask(__name__)
     app.config.from_object(config)
+    # 中文注释：部署在 Nginx 等反向代理后，需要信任转发头来识别 HTTPS 与真实来源 IP
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=config.PROXY_FIX_X_FOR,
+        x_proto=config.PROXY_FIX_X_PROTO,
+        x_host=config.PROXY_FIX_X_HOST,
+        x_port=config.PROXY_FIX_X_PORT,
+        x_prefix=config.PROXY_FIX_X_PREFIX,
+    )
     # 3. 开启 Flask 自动插桩
     from opentelemetry.instrumentation.flask import FlaskInstrumentor
     FlaskInstrumentor().instrument_app(app)
@@ -49,6 +81,12 @@ def create_app():
         init_scheduler(app) # 3. Initialize scheduler
         from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
         SQLAlchemyInstrumentor().instrument(engine=db.engine)
+        try:
+            # 启动阶段预热 MCP：自动拉起本地 stdio MCP，并提前完成工具发现。
+            asyncio.run(mcp_client.warmup())
+        except Exception as e:
+            # MCP 预热失败不阻断主服务，保持 API 可启动。
+            app.logger.warning("MCP warmup failed during startup: %s", e)
     register_routes(app)
     setup_logging()
     return app
@@ -169,10 +207,10 @@ def register_routes(app):
     @login_required
     def auth_me():
         user_id = _get_current_user_id(required=True)
-        user = User.query.get(user_id)
+        user = db.session.get(User, user_id)
         if not user:
             session.clear()
-            return jsonify({'error': 'User not found'}), 401
+            return jsonify({'error': USER_NOT_FOUND_ERROR}), 401
         return jsonify({'authenticated': True, 'user': user.to_dict()})
 
     @app.route('/')
@@ -202,6 +240,8 @@ def register_routes(app):
         if error:
             return error
         message = data.get('message')
+        # 会话维度的 thread_id 由前端透传；缺省时回退 default，保持兼容。
+        session_id = data.get('session_id')
         log_event(
             logger,
             "chat.request.received",
@@ -213,10 +253,10 @@ def register_routes(app):
         if not message:
             return jsonify({'error': 'message is required'}), 400
         
-        user = User.query.get(user_id)
+        user = db.session.get(User, user_id)
         if not user:
             session.clear()
-            return jsonify({'error': 'User not found'}), 401
+            return jsonify({'error': USER_NOT_FOUND_ERROR}), 401
         
         # 获取当前上下文
         current_goal = Goal.query.filter_by(user_id=user_id, status='active').first()
@@ -234,10 +274,26 @@ def register_routes(app):
         db.session.add(user_msg)
         db.session.commit()
         wf_start = time.perf_counter()
+        result = None
         try:
             result = loop.run_until_complete(
-                run_agent_workflow(user_id, message, user.to_dict(), goal_dict, tasks_list)
+                run_agent_workflow(
+                    user_id,
+                    message,
+                    user.to_dict(),
+                    goal_dict,
+                    tasks_list,
+                    session_id=session_id,
+                )
             )
+        except TimeoutError:
+            result = {
+                "next_agent": "CHAT",
+                "final_response": "请求处理超时，系统已降级为聊天模式。请重试更短的问题。",
+                "current_goal": goal_dict,
+                "current_tasks": tasks_list,
+                "game_events": [],
+            }
         finally:
             loop.close()
         log_event(
@@ -274,19 +330,22 @@ def register_routes(app):
                 'goal': result.get('current_goal'),
                 'tasks': result.get('current_tasks'),
                 'profile': user.to_dict(),
-                'game_events': [e for e in result.get('game_events', [])]
+                'game_events': list(result.get('game_events', []))
             }
         })
 
     @app.route('/api/chat/stream', methods=['POST'])
     @login_required
     def chat_stream():
-        start_ts = time.perf_counter()
         data = _json_or_empty()
         user_id, error = _validate_user_scope(payload=data)
         if error:
             return error
         message = data.get('message')
+        stream_id = data.get('stream_id') or str(uuid.uuid4())
+        # 流式接口优先使用 session_id；未提供时复用 stream_id 作为会话隔离标识。
+        session_id = data.get('session_id') or stream_id
+        last_event_id = request.headers.get("Last-Event-ID")
         log_event(
             logger,
             "chat_stream.request.received",
@@ -297,10 +356,10 @@ def register_routes(app):
         if not message:
             return jsonify({'error': 'message is required'}), 400
 
-        user = User.query.get(user_id)
+        user = db.session.get(User, user_id)
         if not user:
             session.clear()
-            return jsonify({'error': 'User not found'}), 401
+            return jsonify({'error': USER_NOT_FOUND_ERROR}), 401
             
         current_goal = Goal.query.filter_by(user_id=user_id, status='active').first()
         current_tasks = Task.query.filter_by(user_id=user_id, status='pending').all()
@@ -309,10 +368,18 @@ def register_routes(app):
         tasks_list = [t.to_dict() for t in current_tasks]
 
         user_msg = ChatLog(id=str(uuid.uuid4()), user_id=user_id, role='user', content=message)
-        db.session.add(user_msg)
-        db.session.commit()
+        with STREAM_SESSIONS_LOCK:
+            now = time.time()
+            expired = [sid for sid, sess in STREAM_SESSIONS.items() if now - sess.created_at > STREAM_SESSION_TTL_SEC]
+            for sid in expired:
+                STREAM_SESSIONS.pop(sid, None)
+            stream_session = STREAM_SESSIONS.get(stream_id)
+            if not stream_session:
+                stream_session = StreamSession()
+                STREAM_SESSIONS[stream_id] = stream_session
+                db.session.add(user_msg)
+                db.session.commit()
 
-        q = queue.Queue()
         user_dict = user.to_dict()
         app_context = app.app_context() # get app context
 
@@ -325,43 +392,105 @@ def register_routes(app):
             async def worker():
                 final_state = None
                 try:
-                    async for event in stream_agent_workflow(user_id, message, user_dict, goal_dict, tasks_list):
-                        q.put(("event", event))
+                    async for event in stream_agent_workflow(
+                        user_id,
+                        message,
+                        user_dict,
+                        goal_dict,
+                        tasks_list,
+                        session_id=session_id,
+                    ):
+                        with stream_session.condition:
+                            stream_session.event_seq += 1
+                            stream_session.events.append((stream_session.event_seq, {"type": "event", "payload": event}))
+                            stream_session.condition.notify_all()
                         for node_name, state_update in event.items():
                             if isinstance(state_update, dict):
                                 final_state = {**(final_state or {}), **state_update}
                 except Exception as e:
-                    q.put(("error", str(e)))
+                    with stream_session.condition:
+                        stream_session.event_seq += 1
+                        stream_session.events.append((stream_session.event_seq, {"type": "error", "payload": str(e)}))
+                        stream_session.done = True
+                        stream_session.condition.notify_all()
                 else:
-                    q.put(("done", final_state))
+                    with stream_session.condition:
+                        stream_session.event_seq += 1
+                        stream_session.events.append((stream_session.event_seq, {"type": "done", "payload": final_state}))
+                        stream_session.done = True
+                        stream_session.final_state = final_state
+                        stream_session.condition.notify_all()
                     
             try:
                 loop.run_until_complete(worker())
             finally:
                 loop.close()
 
-        threading.Thread(target=run_streaming_workflow).start()
+        with stream_session.condition:
+            if not stream_session.events and not stream_session.done:
+                threading.Thread(target=run_streaming_workflow, daemon=True).start()
 
         def generate():
             total_tokens = 0
+            start_idx = 0
+            if last_event_id and str(last_event_id).isdigit():
+                start_idx = int(last_event_id)
             with app_context:
                 while True:
-                    item_type, item_data = q.get()
-                    if item_type == "error":
-                        yield f"data: {json.dumps({'error': item_data})}\n\n"
+                    with stream_session.condition:
+                        while True:
+                            pending = [(eid, ev) for (eid, ev) in stream_session.events if eid > start_idx]
+                            if pending or stream_session.done:
+                                break
+                            stream_session.condition.wait(timeout=5)
+
+                    if not pending and stream_session.done:
                         break
-                    elif item_type == "done":
-                        if item_data:
-                            save_agent_result(user_id, item_data)
-                            final_resp = item_data.get('final_response', '')
-                            # Add the token widget
-                            if total_tokens > -1: # Always append to test
-                                final_resp += f"\n\n> 📊 **Token loss~**\n> 本次调用的总Token为: **{total_tokens}**"
-                            yield f"data: {json.dumps({'type': 'done', 'final_response': final_resp})}\n\n"
-                        break
-                    elif item_type == "event":
-                        # Convert event contents to string or serialize
+
+                    for event_id, event_item in pending:
+                        start_idx = event_id
+                        item_type = event_item["type"]
+                        item_data = event_item["payload"]
+                        if item_type == "error":
+                            yield f"id: {event_id}\ndata: {json.dumps({'error': item_data})}\n\n"
+                            return
+                        if item_type == "done":
+                            if item_data:
+                                save_agent_result(user_id, item_data)
+                                final_resp = item_data.get('final_response', '')
+                                if total_tokens > -1:
+                                    final_resp += f"\n\n> 📊 **Token loss~**\n> 本次调用的总Token为: **{total_tokens}**"
+                                yield f"id: {event_id}\ndata: {json.dumps({'type': 'done', 'final_response': final_resp})}\n\n"
+                            return
                         event_dict = {}
+                        # 统一格式化工具参数，避免出现 <map object ...> 或不可读对象。
+                        def _format_tool_args(tool_call: dict | object) -> str:
+                            if isinstance(tool_call, dict):
+                                raw = tool_call.get("args", tool_call.get("arguments"))
+                            else:
+                                raw = getattr(tool_call, "args", None)
+                                if raw is None:
+                                    raw = getattr(tool_call, "arguments", None)
+
+                            if raw is None:
+                                return "{}"
+
+                            # 常见场景：arguments 是 JSON 字符串，优先解析后再输出。
+                            if isinstance(raw, str):
+                                text = raw.strip()
+                                if not text:
+                                    return "{}"
+                                try:
+                                    parsed = json.loads(text)
+                                    return json.dumps(parsed, ensure_ascii=False)
+                                except Exception:
+                                    return text
+
+                            try:
+                                return json.dumps(raw, ensure_ascii=False)
+                            except Exception:
+                                return str(raw)
+
                         for node_name, state_update in item_data.items():
                             event_msg = f"Agent [{node_name}] executed."
                             if "messages" in state_update and state_update["messages"]:
@@ -388,13 +517,13 @@ def register_routes(app):
                                 if tool_calls:
                                     try:
                                         tool_names = [tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "unknown") for tc in tool_calls]
-                                        event_msg += f" (calling tools: {', '.join(tool_names)})"
+                                        formatted_args = [_format_tool_args(tc) for tc in tool_calls]
+                                        event_msg += f" (calling tools: {', '.join(tool_names)} tools args: {' | '.join(formatted_args)})"
                                     except Exception:
                                         event_msg += f" (calling {len(tool_calls)} tools)"
                                         
                             event_dict[node_name] = event_msg
-                            
-                        yield f"data: {json.dumps({'type': 'update', 'data': event_dict})}\n\n"
+                        yield f"id: {event_id}\ndata: {json.dumps({'type': 'update', 'data': event_dict})}\n\n"
 
         return Response(generate(), mimetype='text/event-stream')
     
@@ -406,59 +535,40 @@ def register_routes(app):
         if error:
             return error
         
-        task = Task.query.get(task_id)
+        task = db.session.get(Task, task_id)
         if not task or task.user_id != user_id:
             return jsonify({'error': 'Task not found'}), 404
         
-        user = User.query.get(user_id)
+        user = db.session.get(User, user_id)
         if not user:
-            return jsonify({'error': 'User not found'}), 404
+            return jsonify({'error': USER_NOT_FOUND_ERROR}), 404
         
         task.status = 'completed'
         task.completed_at = datetime.now()
         
-        difficulty_mult = config.DIFFICULTY_MULTIPLIER.get(task.difficulty, 1.0)
-        xp_earned = int(config.BASE_XP_PER_TASK * difficulty_mult)
-        
+        # 与奖励节点共用 XP 规则，确保接口测试和工作流评估基于同一计算口径。
+        xp_earned = calculate_xp_reward(task.difficulty, task.is_challenge)
         if task.is_challenge:
-            xp_earned = int(xp_earned * 1.5)
             user.challenges_completed += 1
-        
-        old_level = user.level
-        user.current_xp += xp_earned
-        user.total_xp += xp_earned
+
+        updated_profile, level_up = apply_xp_to_profile(user.to_dict(), xp_earned)
+        user.level = updated_profile["level"]
+        user.current_xp = updated_profile["current_xp"]
+        user.total_xp = updated_profile["total_xp"]
+        user.xp_to_next_level = updated_profile["xp_to_next_level"]
         user.tasks_completed += 1
         user.streak_days += 1
-        
-        while user.current_xp >= user.xp_to_next_level:
-            user.current_xp -= user.xp_to_next_level
-            user.level += 1
-            user.xp_to_next_level = int(user.xp_to_next_level * 1.2)
-        
-        level_up = user.level > old_level
-        
+
         import random
-        base_drop_rate = config.DROP_RATE_BASE
-        if task.difficulty == 'hard':
-            base_drop_rate += 0.05
-        elif task.difficulty == 'epic':
-            base_drop_rate += 0.15
-        if task.is_challenge:
-            base_drop_rate += 0.10
-        base_drop_rate += user.streak_days * 0.02
-        
+        # 使用更新后的 streak 计算掉落率，和现有业务表现保持一致。
+        base_drop_rate = calculate_drop_rate(
+            {"difficulty": task.difficulty, "is_challenge": task.is_challenge},
+            user.streak_days,
+        )
+
         drop = None
         if random.random() < base_drop_rate:
-            roll = random.random()
-            if roll < 0.60:
-                rarity = 'common'
-            elif roll < 0.85:
-                rarity = 'rare'
-            elif roll < 0.97:
-                rarity = 'epic'
-            else:
-                rarity = 'legendary'
-            
+            rarity = roll_drop_rarity(random.random)
             reward_pool = Reward.query.filter_by(rarity=rarity).all()
             if reward_pool:
                 drop_reward = random.choice(reward_pool)
@@ -504,7 +614,7 @@ def register_routes(app):
     def get_profile():
         user_id = _get_current_user_id(required=True)
 
-        user = User.query.get(user_id)
+        user = db.session.get(User, user_id)
         if not user:
             return jsonify({
                 'user_id': user_id,
@@ -619,7 +729,7 @@ def register_routes(app):
     @login_required
     def delete_schedule(job_id):
         current_user_id = _get_current_user_id(required=True)
-        job = ScheduledJob.query.get(job_id)
+        job = db.session.get(ScheduledJob, job_id)
         if not job:
             return jsonify({'error': 'Job not found'}), 404
         if job.user_id != current_user_id:
@@ -660,8 +770,10 @@ def check_achievements(user, task=None):
                 user_ach.unlocked_at = datetime.now()
 
 
-app = create_app()
+# 测试/评估场景下允许跳过模块导入时的自动建应用，避免误连真实数据库。
+app = None if os.environ.get("GAMIFIED_LIFE_SKIP_APP_BOOTSTRAP") == "1" else create_app()
 
 
 if __name__ == '__main__':
-    app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)
+    runtime_app = app or create_app()
+    runtime_app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG, use_reloader=False)
